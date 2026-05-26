@@ -27,6 +27,7 @@ SAFE_USER = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 SAFE_DOMAIN = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 SAFE_DB = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 TEXT_FILE_LIMIT = 2 * 1024 * 1024
+DEFAULT_MOODLE_DOWNLOAD_URL = "https://download.moodle.org/download.php/direct/stable502/moodle-latest-502.tgz"
 
 
 def fail(code, detail, **extra):
@@ -952,6 +953,10 @@ def wordpress_salts():
     return "\n".join(f"define('{key}', '{secrets.token_urlsafe(48)}');" for key in keys)
 
 
+def php_single_quoted(value):
+    return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
+
+
 def install_wordpress_app(payload, settings):
     username = payload["username"]
     validate_username(username)
@@ -1029,6 +1034,124 @@ require_once ABSPATH . 'wp-settings.php';
         wp_version=wp_version,
         wp_cli_install_returncode=install_result.get("returncode"),
         wp_cli_output=(install_result.get("stdout") or install_result.get("stderr") or "").strip()[-1000:],
+    )
+
+
+def safe_moodledata_dir(payload, settings, username, domain):
+    home = (Path(settings["home_root"]) / username).resolve(strict=False)
+    requested = payload.get("moodledata_path") or (home / "moodledata" / domain)
+    target = Path(str(requested))
+    if not target.is_absolute():
+        target = home / str(requested).strip("/")
+    target = target.resolve(strict=False)
+    if os.path.commonpath([str(home), str(target)]) != str(home):
+        raise ValueError("Ruta moodledata fuera de la cuenta.")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def install_moodle_app(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    domain = validate_domain(payload["domain"])
+    _, app_dir = safe_app_dir({**payload, "working_dir": payload.get("working_dir") or payload.get("document_root") or "public_html"}, settings)
+    moodledata = safe_moodledata_dir(payload, settings, username, domain)
+    if payload.get("force"):
+        for item in app_dir.iterdir():
+            if item.name not in {".well-known"}:
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+        for item in moodledata.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+    create_database({"engine": "mariadb", "database": payload["database"], "user": payload["db_user"], "password": payload["db_password"]}, emit=False)
+    source_url = str(payload.get("source_url") or settings.get("moodle_download_url") or DEFAULT_MOODLE_DOWNLOAD_URL)
+    if not (app_dir / "version.php").exists():
+        archive = Path("/tmp") / f"moodle-{secrets.token_hex(6)}.tgz"
+        download_file(source_url, archive)
+        with tarfile.open(archive, "r:gz") as tar:
+            for member in tar.getmembers():
+                if not member.name.startswith("moodle/") or member.name == "moodle/":
+                    continue
+                member.name = member.name[len("moodle/") :]
+                target = (app_dir / member.name).resolve(strict=False)
+                if os.path.commonpath([str(app_dir.resolve(strict=False)), str(target)]) == str(app_dir.resolve(strict=False)):
+                    tar.extract(member, app_dir)
+        archive.unlink(missing_ok=True)
+    table_prefix = re.sub(r"[^A-Za-z0-9_]", "_", payload.get("table_prefix") or "mdl_")[:20] or "mdl_"
+    if not table_prefix.endswith("_"):
+        table_prefix += "_"
+    config = app_dir / "config.php"
+    config.write_text(
+        f"""<?php
+unset($CFG);
+global $CFG;
+$CFG = new stdClass();
+$CFG->dbtype = 'mysqli';
+$CFG->dblibrary = 'native';
+$CFG->dbhost = 'localhost';
+$CFG->dbname = '{php_single_quoted(payload["database"])}';
+$CFG->dbuser = '{php_single_quoted(payload["db_user"])}';
+$CFG->dbpass = '{php_single_quoted(payload["db_password"])}';
+$CFG->prefix = '{php_single_quoted(table_prefix)}';
+$CFG->dboptions = array(
+    'dbpersist' => false,
+    'dbport' => '',
+    'dbsocket' => '',
+    'dbcollation' => 'utf8mb4_unicode_ci',
+);
+$CFG->wwwroot = '{php_single_quoted(public_url(payload, domain))}';
+$CFG->dataroot = '{php_single_quoted(str(moodledata))}';
+$CFG->admin = 'admin';
+$CFG->directorypermissions = 02775;
+require_once(__DIR__ . '/lib/setup.php');
+""",
+        encoding="utf-8",
+    )
+    chown_account(username, app_dir)
+    chown_account(username, moodledata)
+    php = php_binary(payload.get("php_version") or settings.get("php_version") or "8.3")
+    install_result = run(
+        [
+            "runuser",
+            "-u",
+            username,
+            "--",
+            php,
+            str(app_dir / "admin" / "cli" / "install_database.php"),
+            "--agree-license",
+            "--non-interactive",
+            "--adminuser=" + str(payload["admin_user"]),
+            "--adminpass=" + str(payload["admin_password"]),
+            "--adminemail=" + str(payload["admin_email"]),
+            "--fullname=" + str(payload.get("site_title") or "Moodle"),
+            "--shortname=" + str(payload.get("site_shortname") or domain.split(".")[0] or "moodle"),
+            "--lang=" + str(payload.get("language") or "es"),
+        ],
+        check=False,
+        cwd=str(app_dir),
+    )
+    if install_result.get("returncode") != 0:
+        raise RuntimeError((install_result.get("stderr") or install_result.get("stdout") or "No se pudo instalar Moodle").strip())
+    cron_name = "ehpanel-moodle-" + re.sub(r"[^A-Za-z0-9_.-]", "-", f"{username}-{domain}")[:80]
+    cron_file = Path("/etc/cron.d") / cron_name
+    cron_file.write_text(f"*/5 * * * * {username} {php} {app_dir}/admin/cli/cron.php >/dev/null 2>&1\n", encoding="utf-8")
+    cron_file.chmod(0o644)
+    version_text = (app_dir / "version.php").read_text(encoding="utf-8", errors="ignore") if (app_dir / "version.php").exists() else ""
+    release_match = re.search(r"\$release\s*=\s*'([^']+)'", version_text)
+    return ok(
+        app_id=payload.get("app_id"),
+        url=public_url(payload, domain),
+        install_path=str(app_dir),
+        moodledata_path=str(moodledata),
+        cron_file=str(cron_file),
+        source_url=source_url,
+        moodle_version=release_match.group(1) if release_match else "",
+        php_version=command_stdout([php, "-r", "echo PHP_VERSION;"]),
     )
 
 
@@ -2588,6 +2711,8 @@ def main():
             return create_database(payload)
         if job_type == "install_wordpress":
             return install_wordpress_app(payload, settings)
+        if job_type == "install_moodle":
+            return install_moodle_app(payload, settings)
         if job_type == "deploy_node_app":
             return deploy_node_app(payload, settings)
         if job_type == "deploy_django_app":

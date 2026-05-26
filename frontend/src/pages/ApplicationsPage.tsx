@@ -1,6 +1,7 @@
 ﻿import {
   Archive,
   ArrowLeft,
+  BookOpen,
   ChevronDown,
   Code2,
   Database,
@@ -28,7 +29,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 type AppsTab = "Instaladas" | "Catálogo" | "EHPanel App's" | "Actualizaciones" | "Backups" | "Staging"
-type RuntimeType = "WordPress" | "Django / Python" | "Node.js" | "Laravel"
+type RuntimeType = "WordPress" | "Django / Python" | "Node.js" | "Laravel" | "Moodle"
 
 const tabs: AppsTab[] = ["Instaladas", "Catálogo", "EHPanel App's", "Actualizaciones", "Backups", "Staging"]
 
@@ -211,7 +212,7 @@ function InstalledAppsTable({
                   <div className="flex justify-end gap-1">
                     <IconAction icon={ExternalLink} label="Abrir app" onClick={() => window.open(app.url, "_blank")} />
                     <IconAction icon={RefreshCcw} label="Comprobar updates" onClick={() => onCheckUpdates(app)} />
-                    {app.type !== "wordpress" ? <IconAction icon={Play} label="Reiniciar" onClick={() => onRestart(app)} /> : null}
+                    {app.type !== "wordpress" && app.type !== "moodle" ? <IconAction icon={Play} label="Reiniciar" onClick={() => onRestart(app)} /> : null}
                     <IconAction icon={Archive} label="Backup" onClick={() => onBackup(app)} />
                     <IconAction icon={Trash2} label="Eliminar" onClick={() => onDelete(app)} tone="danger" />
                   </div>
@@ -354,8 +355,9 @@ function InstallAppModal({
     }
   }
 
-  const needsRuntimePath = app.runtime !== "wordpress"
-  const needsDatabase = app.runtime === "wordpress" || app.runtime === "django" || app.runtime === "laravel"
+  const installsInDocumentRoot = app.runtime === "wordpress" || app.runtime === "moodle"
+  const needsRuntimePath = !installsInDocumentRoot
+  const needsDatabase = app.runtime === "wordpress" || app.runtime === "moodle" || app.runtime === "django" || app.runtime === "laravel"
   const selectedDomain = domains.find((domain) => String(domain.id) === form.domain) ?? domains[0] ?? null
 
   return (
@@ -377,16 +379,30 @@ function InstallAppModal({
               {domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.domain}</option>)}
             </FormSelect>
             <FormInput label="Nombre de la app" value={form.name} onChange={(value) => update("name", value)} />
-            {app.runtime === "wordpress" ? (
+            {installsInDocumentRoot ? (
               <>
                 <FormInput label="Titulo del sitio" value={form.site_title} onChange={(value) => update("site_title", value)} />
                 <FormSelect label="Idioma" value={form.language} onChange={(value) => update("language", value)}>
-                  <option value="es_ES">Español</option>
-                  <option value="en_US">Inglés</option>
+                  {app.runtime === "moodle" ? (
+                    <>
+                      <option value="es">Español</option>
+                      <option value="en">Inglés</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="es_ES">Español</option>
+                      <option value="en_US">Inglés</option>
+                    </>
+                  )}
                 </FormSelect>
                 <FormInput label="Usuario administrador" value={form.admin_user} onChange={(value) => update("admin_user", value)} />
                 <FormInput label="Email administrador" value={form.admin_email} onChange={(value) => update("admin_email", value)} />
                 <FormInput label="Contraseña administrador" type="password" value={form.admin_password} onChange={(value) => update("admin_password", value)} />
+                {app.runtime === "moodle" ? (
+                  <FormSelect label="Versión PHP" value={form.php_version} onChange={(value) => update("php_version", value)}>
+                    {phpVersions.map((version) => <option key={version} value={version}>{version}</option>)}
+                  </FormSelect>
+                ) : null}
               </>
             ) : null}
             {needsRuntimePath ? (
@@ -433,7 +449,7 @@ function InstallAppModal({
           {needsDatabase ? (
             <CollapsibleSection isOpen={showSuggested} onToggle={() => setShowSuggested((value) => !value)} title="Datos sugeridos de base de datos">
               <div className="grid gap-3 md:grid-cols-2">
-                {app.runtime !== "wordpress" ? (
+                {!installsInDocumentRoot ? (
                   <FormSelect label="Motor de base de datos" value={form.database_engine} onChange={(value) => update("database_engine", value)}>
                     <option value="mariadb">MariaDB</option>
                     <option value="postgresql">PostgreSQL</option>
@@ -442,7 +458,7 @@ function InstallAppModal({
                 <FormInput label="Base de datos" value={form.db_name} onChange={(value) => update("db_name", value)} />
                 <FormInput label="Usuario BD" value={form.db_user} onChange={(value) => update("db_user", value)} />
                 <FormInput label="Contraseña BD" type="password" value={form.db_password} onChange={(value) => update("db_password", value)} />
-                {app.runtime === "wordpress" ? <FormInput label="Prefijo de tablas" value={form.table_prefix} onChange={(value) => update("table_prefix", value)} /> : null}
+                {installsInDocumentRoot ? <FormInput label="Prefijo de tablas" value={form.table_prefix} onChange={(value) => update("table_prefix", value)} /> : null}
               </div>
             </CollapsibleSection>
           ) : null}
@@ -678,8 +694,8 @@ function emptyInstallForm(domain: HostingDomain | undefined, app: AppCatalogItem
     admin_user: "admin",
     admin_password: "",
     admin_email: domain ? `admin@${domain.domain}` : "",
-    language: "es_ES",
-    table_prefix: "wp_",
+    language: app.runtime === "moodle" ? "es" : "es_ES",
+    table_prefix: app.runtime === "moodle" ? "mdl_" : "wp_",
     database_engine: app.runtime === "django" ? "postgresql" : "mariadb",
     db_name: "",
     db_user: "",
@@ -699,26 +715,27 @@ function emptyInstallForm(domain: HostingDomain | undefined, app: AppCatalogItem
 }
 
 function formFromSuggestion(suggestion: AppInstallSuggestion, app: AppCatalogItem): InstallForm {
+  const siteSuggestion = app.runtime === "moodle" ? suggestion.moodle : suggestion.wordpress
   return {
     domain: String(suggestion.domain),
     name: suggestion.name || app.name,
     instance_id: suggestion.instance_id,
     port: String(suggestion.port),
     working_dir: suggestion.working_dir,
-    site_title: suggestion.wordpress.site_title,
-    admin_user: suggestion.wordpress.admin_user,
-    admin_password: suggestion.wordpress.admin_password,
-    admin_email: suggestion.wordpress.admin_email,
-    language: suggestion.wordpress.language,
-    table_prefix: suggestion.wordpress.table_prefix,
-    database_engine: (app.runtime === "django" ? suggestion.django.database_engine : suggestion.laravel.database_engine) || "mariadb",
+    site_title: siteSuggestion.site_title,
+    admin_user: siteSuggestion.admin_user,
+    admin_password: siteSuggestion.admin_password,
+    admin_email: siteSuggestion.admin_email,
+    language: siteSuggestion.language,
+    table_prefix: siteSuggestion.table_prefix,
+    database_engine: (app.runtime === "moodle" ? suggestion.moodle.database_engine : app.runtime === "django" ? suggestion.django.database_engine : suggestion.laravel.database_engine) || "mariadb",
     db_name: suggestion.database.database,
     db_user: suggestion.database.user,
     db_password: suggestion.database.password,
     project_module: suggestion.django.project_module,
     django_version: suggestion.django.django_version,
     workers: String(app.runtime === "python" ? suggestion.python.workers : suggestion.django.workers),
-    php_version: suggestion.laravel.php_version,
+    php_version: app.runtime === "moodle" ? suggestion.moodle.php_version : suggestion.laravel.php_version,
     script: suggestion.nodejs.script,
     node_version: suggestion.nodejs.node_version,
     wsgi_module: suggestion.python.wsgi_module,
@@ -741,7 +758,7 @@ function payloadFromForm(runtime: HostingApplication["type"], form: InstallForm)
       auto_backup_after_install: form.auto_backup_after_install,
     },
   }
-  if (runtime === "wordpress") {
+  if (runtime === "wordpress" || runtime === "moodle") {
     return {
       ...common,
       site_title: form.site_title,
@@ -750,6 +767,7 @@ function payloadFromForm(runtime: HostingApplication["type"], form: InstallForm)
       admin_email: form.admin_email,
       language: form.language,
       table_prefix: form.table_prefix,
+      php_version: form.php_version,
       db_name: form.db_name,
       db_user: form.db_user,
       db_password: form.db_password,
@@ -789,6 +807,7 @@ function payloadFromForm(runtime: HostingApplication["type"], form: InstallForm)
 
 function defaultRequirements(runtime: HostingApplication["type"]) {
   if (runtime === "wordpress") return ["PHP", "MariaDB", "Acceso al document root"]
+  if (runtime === "moodle") return ["PHP 8.3+", "MariaDB", "Cron cada 5 minutos", "moodledata fuera del webroot"]
   if (runtime === "laravel") return ["PHP", "Composer", "MariaDB o PostgreSQL"]
   if (runtime === "django") return ["Python", "venv/pip", "MariaDB o PostgreSQL"]
   if (runtime === "nodejs") return ["Node.js", "pnpm/npm", "Puerto interno disponible"]
@@ -847,7 +866,7 @@ function EHPanelApps({
   selectedRuntime: RuntimeType
   onSelectRuntime: (runtime: RuntimeType) => void
 }) {
-  const runtimes: RuntimeType[] = ["WordPress", "Django / Python", "Node.js", "Laravel"]
+  const runtimes: RuntimeType[] = ["WordPress", "Moodle", "Django / Python", "Node.js", "Laravel"]
 
   return (
     <div className="grid gap-4 xl:grid-cols-[230px_1fr]">
@@ -877,7 +896,50 @@ function RuntimePanel({ apps, onRefresh, runtime }: { apps: HostingApplication[]
   if (runtime === "Django / Python") return <PythonDjangoToolPanel apps={apps.filter((app) => app.type === "django" || app.type === "python")} onRefresh={onRefresh} />
   if (runtime === "Node.js") return <NodeToolPanel apps={apps.filter((app) => app.type === "nodejs")} onRefresh={onRefresh} />
   if (runtime === "Laravel") return <LaravelToolPanel apps={apps.filter((app) => app.type === "laravel")} onRefresh={onRefresh} />
+  if (runtime === "Moodle") return <MoodleToolPanel apps={apps.filter((app) => app.type === "moodle")} />
   return null
+}
+
+function MoodleToolPanel({ apps }: { apps: HostingApplication[] }) {
+  if (!apps.length) {
+    return (
+      <div className="rounded-lg border border-slate-200 bg-white p-6 text-center text-sm font-semibold text-slate-500">
+        No hay instalaciones Moodle registradas. Usa Detectar apps o instala Moodle desde el catálogo.
+      </div>
+    )
+  }
+  return (
+    <div className="grid gap-3 md:grid-cols-2">
+      {apps.map((app) => (
+        <div className="rounded-lg border border-slate-200 bg-white p-4" key={app.id}>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="eh-kicker">{app.domain_name}</div>
+              <div className="mt-1 truncate text-base font-bold text-slate-900">{app.name}</div>
+              <div className="mt-1 truncate text-xs font-semibold text-slate-500">{app.install_path}</div>
+            </div>
+            <StatusPill value={appStatusLabel(app.status)} />
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-semibold text-slate-600">
+            <div className="rounded-md bg-slate-50 p-2">
+              <div className="text-slate-400">Versión</div>
+              <div className="mt-1 text-slate-900">{app.version || String(app.metadata?.moodle_version || "-")}</div>
+            </div>
+            <div className="rounded-md bg-slate-50 p-2">
+              <div className="text-slate-400">Cron</div>
+              <div className="mt-1 truncate text-slate-900">{String(app.metadata?.cron_file || "Configurado al instalar")}</div>
+            </div>
+          </div>
+          <div className="mt-3 flex justify-end gap-2">
+            <Button onClick={() => window.open(app.url, "_blank", "noopener,noreferrer")} size="sm" type="button" variant="outline">
+              <ExternalLink className="h-4 w-4" />
+              Abrir
+            </Button>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function PythonDjangoToolPanel({ apps, onRefresh }: { apps: HostingApplication[]; onRefresh: () => Promise<void> }) {
@@ -1763,6 +1825,7 @@ function AppIcon({ type }: { type: RuntimeType }) {
 
 function AppSmallIcon({ type }: { type: RuntimeType }) {
   if (type === "WordPress") return <Globe2 className="h-4 w-4" />
+  if (type === "Moodle") return <BookOpen className="h-4 w-4" />
   if (type === "Django / Python") return <Code2 className="h-4 w-4" />
   if (type === "Node.js") return <ServerCog className="h-4 w-4" />
   return <Database className="h-4 w-4" />
@@ -1778,6 +1841,7 @@ function StatusPill({ value }: { value: string }) {
 
 function runtimeLabel(type: HostingApplication["type"]): RuntimeType {
   if (type === "wordpress") return "WordPress"
+  if (type === "moodle") return "Moodle"
   if (type === "django" || type === "python") return "Django / Python"
   if (type === "nodejs") return "Node.js"
   return "Laravel"

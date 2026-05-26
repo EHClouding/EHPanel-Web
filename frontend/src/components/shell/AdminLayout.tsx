@@ -5131,9 +5131,10 @@ const provisioningTemplateActions: ProvisioningTemplateAction[] = [
   { key: "create_dns_zone", label: "DNS", enabled: true, order: 2 },
   { key: "issue_ssl", label: "SSL", enabled: true, order: 3 },
   { key: "install_wordpress", label: "WordPress", enabled: true, order: 4 },
-  { key: "create_admin_mail", label: "Correo admin", enabled: true, order: 5 },
-  { key: "initial_backup", label: "Backup inicial", enabled: true, order: 6 },
-  { key: "enable_waf", label: "WAF", enabled: false, order: 7 },
+  { key: "install_moodle", label: "Moodle", enabled: false, order: 5 },
+  { key: "create_admin_mail", label: "Correo admin", enabled: true, order: 6 },
+  { key: "initial_backup", label: "Backup inicial", enabled: true, order: 7 },
+  { key: "enable_waf", label: "WAF", enabled: false, order: 8 },
 ]
 
 type ProvisioningTemplateFormState = {
@@ -5517,6 +5518,7 @@ function provisioningTemplatePayload(form: ProvisioningTemplateFormState): Provi
     automation: {
       enable_waf: Boolean(form.actions.enable_waf),
       initial_backup: Boolean(form.actions.initial_backup),
+      install_moodle: Boolean(form.actions.install_moodle),
       install_wordpress: Boolean(form.actions.install_wordpress),
     },
     category: form.category,

@@ -1,4 +1,5 @@
 import ipaddress
+import re
 
 from django.utils import timezone
 from rest_framework import serializers
@@ -1774,13 +1775,19 @@ class InstallCatalogAppSerializer(serializers.Serializer):
         request = self.context.get("request")
         if request and not user_can_access_account(request.user, hosting_domain.account):
             raise serializers.ValidationError({"domain": "No tienes acceso a este dominio."})
-        if runtime == HostingApplication.AppType.WORDPRESS:
+        if runtime in [HostingApplication.AppType.WORDPRESS, HostingApplication.AppType.MOODLE]:
             required = ["admin_user", "admin_password", "admin_email", "db_name", "db_user", "db_password"]
             missing = [field for field in required if not attrs.get(field)]
             if missing:
-                raise serializers.ValidationError({field: "Campo requerido para WordPress." for field in missing})
-            if HostingApplication.objects.filter(domain=hosting_domain, app_type=HostingApplication.AppType.WORDPRESS).exists() and not attrs.get("force"):
-                raise serializers.ValidationError({"domain": "Ya existe una instalacion WordPress registrada para este dominio."})
+                app_label = "Moodle" if runtime == HostingApplication.AppType.MOODLE else "WordPress"
+                raise serializers.ValidationError({field: f"Campo requerido para {app_label}." for field in missing})
+            if runtime == HostingApplication.AppType.MOODLE:
+                password = attrs.get("admin_password", "")
+                if not (re.search(r"[a-z]", password) and re.search(r"[A-Z]", password) and re.search(r"\d", password) and re.search(r"[^A-Za-z0-9]", password)):
+                    raise serializers.ValidationError({"admin_password": "Moodle requiere una contraseña con mayuscula, minuscula, numero y simbolo."})
+            if HostingApplication.objects.filter(domain=hosting_domain, app_type=runtime).exists() and not attrs.get("force"):
+                app_label = "Moodle" if runtime == HostingApplication.AppType.MOODLE else "WordPress"
+                raise serializers.ValidationError({"domain": f"Ya existe una instalacion {app_label} registrada para este dominio."})
         elif runtime in [HostingApplication.AppType.DJANGO, HostingApplication.AppType.LARAVEL]:
             required = ["instance_id", "port", "working_dir", "db_name", "db_user", "db_password", "database_engine"]
             missing = [field for field in required if not attrs.get(field)]

@@ -30,6 +30,7 @@ const runtimeMeta: Record<SiteRuntime, { label: string; tone: string; icon: Luci
   custom: { icon: Globe2, label: "Custom", tone: "bg-slate-100 text-slate-700" },
   django: { icon: Code2, label: "Django", tone: "bg-emerald-50 text-emerald-700" },
   laravel: { icon: Code2, label: "Laravel", tone: "bg-red-50 text-red-700" },
+  moodle: { icon: Globe2, label: "Moodle", tone: "bg-violet-50 text-violet-700" },
   nodejs: { icon: PlugZap, label: "Node.js", tone: "bg-lime-50 text-lime-700" },
   python: { icon: Code2, label: "Python", tone: "bg-blue-50 text-blue-700" },
   unknown: { icon: Search, label: "Sin detectar", tone: "bg-amber-50 text-amber-700" },
@@ -48,6 +49,7 @@ const emptyOverview: SitesOverviewResponse = {
     mailEvents: 0,
     mailRejected: 0,
     mailSeries: [],
+    moodle: 0,
     requestSeries: [],
     requests: 0,
     total: 0,
@@ -359,6 +361,13 @@ function runtimeActions(site: SiteOverviewRow): Array<{ disabled?: boolean; icon
       { disabled: !site.app, icon: UserRoundCog, key: "wp_login", label: "Login automatico WP" },
       { disabled: true, icon: KeyRound, key: "wp_credentials", label: "Editar credenciales WP" },
       { disabled: !site.app, icon: RefreshCcw, key: "check_updates", label: "Buscar actualizaciones" },
+      { disabled: !site.app, icon: Archive, key: "backup", label: "Crear backup" },
+    ]
+  }
+  if (site.runtime === "moodle") {
+    return [
+      { disabled: !quick("open_site")?.enabled, icon: ExternalLink, key: "open_site", label: "Abrir sitio" },
+      { disabled: !site.app, icon: Database, key: "check_updates", label: "Verificar Moodle" },
       { disabled: !site.app, icon: Archive, key: "backup", label: "Crear backup" },
     ]
   }

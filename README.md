@@ -152,6 +152,7 @@ El archivo real en produccion vive normalmente en:
 | `LOCAL_PROVISIONING_SUDO` | `true` | Ejecuta helper con sudo. |
 | `LOCAL_PROVISION_SSL` | `true` | Permite emitir SSL desde provisionamiento. |
 | `LOCAL_PROVISION_MAIL` | `true` | Permite configurar correo local. |
+| `LOCAL_MOODLE_DOWNLOAD_URL` | vacio | Override opcional del paquete Moodle; si queda vacio usa el paquete oficial estable definido en el helper. |
 | `LOCAL_WEBMAIL_ENABLED` | `true` | Activa webmail por cuenta. |
 | `WEBMAIL_SSO_SECRET` | valor aleatorio | SSO panel -> webmail. |
 | `DBTOOLS_SSO_SECRET` | valor aleatorio | SSO panel -> phpMyAdmin/Adminer. |

@@ -1247,6 +1247,7 @@ class HostingApplication(models.Model):
         DJANGO = "django", "Django"
         NODEJS = "nodejs", "Node.js"
         LARAVEL = "laravel", "Laravel"
+        MOODLE = "moodle", "Moodle"
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"

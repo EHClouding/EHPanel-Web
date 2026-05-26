@@ -91,6 +91,7 @@ def helper_settings_payload():
         "postfix_virtual_mailboxes_file": getattr(settings, "LOCAL_POSTFIX_VIRTUAL_MAILBOXES_FILE", "/etc/postfix/ehpanel-virtual-mailboxes"),
         "file_manager_temp_root": str(getattr(settings, "LOCAL_FILE_MANAGER_TEMP_ROOT", "/opt/ehpanel/web/media/file-manager")),
         "advanced_root": getattr(settings, "LOCAL_ADVANCED_ROOT", "/etc/ehpanel/advanced"),
+        "moodle_download_url": getattr(settings, "LOCAL_MOODLE_DOWNLOAD_URL", ""),
         "public_ip": local_public_ip(),
     }
 

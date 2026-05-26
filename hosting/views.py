@@ -2025,6 +2025,7 @@ class HostingAccountViewSet(viewsets.ModelViewSet):
                 "active": len([site for site in sites if site["status"] == HostingAccount.Status.ACTIVE]),
                 "apps": len([site for site in sites if site["app"]]),
                 "wordpress": len([site for site in sites if site["runtime"] == "wordpress"]),
+                "moodle": len([site for site in sites if site["runtime"] == "moodle"]),
                 "alerts": len([site for site in sites if site["health"] != "ok"]),
                 "diskUsed": round(disk_used_total, 2),
                 "diskPct": pct(disk_used_total, disk_quota_total),

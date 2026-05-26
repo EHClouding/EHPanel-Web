@@ -749,6 +749,7 @@ export type SitesOverviewResponse = {
     active: number
     apps: number
     wordpress: number
+    moodle?: number
     alerts: number
     diskUsed: number
     diskPct: number
@@ -1545,7 +1546,7 @@ export type UpdateFtpUserPayload = {
 export type HostingApplication = {
   id: number
   name: string
-  type: "wordpress" | "python" | "django" | "nodejs" | "laravel"
+  type: "wordpress" | "python" | "django" | "nodejs" | "laravel" | "moodle"
   account: string
   domain: number
   domain_name: string
@@ -1584,6 +1585,7 @@ export type AppInstallSuggestion = {
   php_versions: string[]
   node_versions: string[]
   wordpress: { site_title: string; admin_user: string; admin_password: string; admin_email: string; language: string; table_prefix: string }
+  moodle: { site_title: string; site_shortname: string; admin_user: string; admin_password: string; admin_email: string; language: string; table_prefix: string; php_version: string; database_engine: "mariadb" | "postgresql" }
   django: { project_module: string; django_version: string; workers: number; database_engine: "mariadb" | "postgresql" }
   laravel: { php_version: string; database_engine: "mariadb" | "postgresql" }
   nodejs: { script: string; node_version: string; database_engine: "mariadb" | "postgresql"; create_database: boolean }

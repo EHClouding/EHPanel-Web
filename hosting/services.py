@@ -2661,8 +2661,15 @@ def app_install_suggestions(hosting_domain, runtime, name=""):
         HostingApplication.AppType.PYTHON: "Python",
         HostingApplication.AppType.NODEJS: "Node.js",
         HostingApplication.AppType.LARAVEL: "Laravel",
+        HostingApplication.AppType.MOODLE: "Moodle",
     }.get(runtime, "App")
-    instance_id = app_safe_slug(label if runtime != HostingApplication.AppType.WORDPRESS else f"wp-{hosting_domain.domain.split('.')[0]}", runtime)
+    if runtime == HostingApplication.AppType.WORDPRESS:
+        instance_source = f"wp-{hosting_domain.domain.split('.')[0]}"
+    elif runtime == HostingApplication.AppType.MOODLE:
+        instance_source = f"moodle-{hosting_domain.domain.split('.')[0]}"
+    else:
+        instance_source = label
+    instance_id = app_safe_slug(instance_source, runtime)
     database = app_database_defaults(account, runtime, instance_id)
     port_seed = secrets.randbelow(20000)
     port = 18000 + port_seed
@@ -2685,6 +2692,17 @@ def app_install_suggestions(hosting_domain, runtime, name=""):
             "admin_email": account.customer_email or f"admin@{hosting_domain.domain}",
             "language": "es_ES",
             "table_prefix": "wp_",
+        },
+        "moodle": {
+            "site_title": label,
+            "site_shortname": hosting_domain.domain.split(".")[0][:20] or "moodle",
+            "admin_user": "admin",
+            "admin_password": f"{secrets.token_urlsafe(12)}Aa1!",
+            "admin_email": account.customer_email or f"admin@{hosting_domain.domain}",
+            "language": "es",
+            "table_prefix": "mdl_",
+            "php_version": account.php_version if account.php_version in php_versions else php_versions[0],
+            "database_engine": HostingDatabase.Engine.MARIADB,
         },
         "django": {
             "project_module": "ehpanelapp",
@@ -2754,6 +2772,21 @@ def install_catalog_app(runtime, hosting_domain, payload):
             payload.get("table_prefix", "wp_"),
             payload.get("force", False),
             payload.get("language", "es_ES"),
+        )
+    if runtime == HostingApplication.AppType.MOODLE:
+        return install_moodle(
+            hosting_domain,
+            payload.get("site_title") or payload.get("name") or "Moodle",
+            payload["db_name"],
+            payload["db_user"],
+            payload["db_password"],
+            payload["admin_user"],
+            payload["admin_password"],
+            payload["admin_email"],
+            payload.get("table_prefix", "mdl_"),
+            payload.get("force", False),
+            payload.get("language", "es"),
+            payload.get("php_version", ""),
         )
     if runtime == HostingApplication.AppType.DJANGO:
         return deploy_django_app(
@@ -2855,6 +2888,68 @@ def install_wordpress(hosting_domain, site_title, db_name, db_user, db_password,
                 "admin_email": admin_email,
                 "language": language,
                 "table_prefix": table_prefix,
+                "force": bool(force),
+            },
+        )
+        app.last_job = job
+        app.save(update_fields=["last_job", "updated_at"])
+    return app
+
+
+def install_moodle(hosting_domain, site_title, db_name, db_user, db_password, admin_user, admin_password, admin_email, table_prefix="mdl_", force=False, language="es", php_version=""):
+    account = hosting_domain.account
+    document_root = hosting_domain.document_root or "public_html"
+    install_path = f"/home/{account.username}/{document_root.strip('/')}"
+    moodledata_path = f"/home/{account.username}/moodledata/{hosting_domain.domain}"
+    php_version = php_version or account.php_version or "8.3"
+    with transaction.atomic():
+        app, _created = HostingApplication.objects.update_or_create(
+            domain=hosting_domain,
+            app_type=HostingApplication.AppType.MOODLE,
+            defaults={
+                "account": account,
+                "name": site_title or f"Moodle - {hosting_domain.domain}",
+                "install_path": install_path,
+                "url": hosting_domain_base_url(hosting_domain),
+                "status": HostingApplication.Status.INSTALLING,
+                "metadata": {
+                    "database": db_name,
+                    "db_user": db_user,
+                    "admin_user": admin_user,
+                    "admin_email": admin_email,
+                    "language": language,
+                    "table_prefix": table_prefix,
+                    "php_version": php_version,
+                    "moodledata_path": moodledata_path,
+                    "instance_id": f"moodle-{hosting_domain.id}",
+                    "port": 0,
+                    "runtime": "moodle",
+                },
+            },
+        )
+        register_app_database(account, HostingDatabase.Engine.MARIADB, db_name, db_user, db_password)
+        job = queue_account_job(
+            account,
+            AgentJob.Type.INSTALL_MOODLE,
+            {
+                "app_id": app.id,
+                "username": account.username,
+                "domain": hosting_domain.domain,
+                "ssl_active": hosting_domain.ssl_status == HostingDomain.Status.ACTIVE,
+                "working_dir": document_root,
+                "document_root": document_root,
+                "database": db_name,
+                "db_user": db_user,
+                "db_password": db_password,
+                "site_title": site_title,
+                "site_shortname": hosting_domain.domain.split(".")[0][:20] or "moodle",
+                "admin_user": admin_user,
+                "admin_password": admin_password,
+                "admin_email": admin_email,
+                "language": language,
+                "table_prefix": table_prefix,
+                "php_version": php_version,
+                "moodledata_path": moodledata_path,
                 "force": bool(force),
             },
         )
@@ -3304,6 +3399,7 @@ def collect_app_logs(app, limit=120):
 
 DEFAULT_APP_CATALOG = [
     {"slug": "wordpress", "name": "WordPress", "type": "CMS", "runtime": "wordpress", "detail": "Blog, web corporativa, WooCommerce", "status": "available", "requirements": ["PHP 8.1+", "MariaDB", "WP-CLI opcional"]},
+    {"slug": "moodle", "name": "Moodle", "type": "LMS", "runtime": "moodle", "detail": "Campus virtual y cursos online", "status": "available", "requirements": ["PHP 8.3+", "MariaDB 10.11+", "Cron cada 5 minutos", "moodledata fuera del webroot"]},
     {"slug": "laravel", "name": "Laravel", "type": "Framework PHP", "runtime": "laravel", "detail": "Aplicacion PHP moderna", "status": "available", "requirements": ["PHP 8.2+", "Composer", "MariaDB o PostgreSQL"]},
     {"slug": "django", "name": "Django", "type": "Python", "runtime": "django", "detail": "Aplicacion WSGI/ASGI", "status": "available", "requirements": ["Python 3.12", "pip/venv", "MariaDB o PostgreSQL"]},
     {"slug": "nodejs", "name": "Node.js", "type": "Runtime", "runtime": "nodejs", "detail": "SSR, API o app web", "status": "available", "requirements": ["Node.js", "pnpm/npm", "Puerto interno disponible"]},
@@ -3569,8 +3665,8 @@ def sync_job_side_effects(job):
                         app.status = HostingApplication.Status.ACTIVE
                 if (job.result or {}).get("url"):
                     app.url = job.result["url"]
-                if (job.result or {}).get("wp_version"):
-                    app.version = job.result["wp_version"]
+                if (job.result or {}).get("wp_version") or (job.result or {}).get("moodle_version"):
+                    app.version = (job.result or {}).get("wp_version") or (job.result or {}).get("moodle_version")
                     app.save(update_fields=["status", "version", "url", "metadata", "updated_at"])
                 elif job.job_type == AgentJob.Type.CHECK_APP_UPDATES:
                     app.metadata = {**(app.metadata or {}), "updates": job.result or {}}

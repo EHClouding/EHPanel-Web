@@ -149,6 +149,7 @@ class AgentJob(models.Model):
         COLLECT_MAILBOX_USAGE = "collect_mailbox_usage", "Collect mailbox usage"
         TEST_MAIL_DELIVERY = "test_mail_delivery", "Test mail delivery"
         INSTALL_WORDPRESS = "install_wordpress", "Install WordPress"
+        INSTALL_MOODLE = "install_moodle", "Install Moodle"
         UPDATE_WORDPRESS = "wordpress_update", "Update WordPress"
         DELETE_WORDPRESS = "wordpress_delete", "Delete WordPress"
         WORDPRESS_TOOLKIT = "wordpress_toolkit", "WordPress toolkit"

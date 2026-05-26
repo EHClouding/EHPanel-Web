@@ -65,6 +65,7 @@ LOCAL_DOVECOT_PASSWD_FILE = os.environ.get("LOCAL_DOVECOT_PASSWD_FILE", "/etc/do
 LOCAL_POSTFIX_VIRTUAL_DOMAINS_FILE = os.environ.get("LOCAL_POSTFIX_VIRTUAL_DOMAINS_FILE", "/etc/postfix/ehpanel-virtual-domains")
 LOCAL_POSTFIX_VIRTUAL_MAILBOXES_FILE = os.environ.get("LOCAL_POSTFIX_VIRTUAL_MAILBOXES_FILE", "/etc/postfix/ehpanel-virtual-mailboxes")
 LOCAL_FILE_MANAGER_TEMP_ROOT = Path(os.environ.get("LOCAL_FILE_MANAGER_TEMP_ROOT", BASE_DIR / "media" / "file-manager"))
+LOCAL_MOODLE_DOWNLOAD_URL = os.environ.get("LOCAL_MOODLE_DOWNLOAD_URL", "")
 
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 CSRF_TRUSTED_ORIGINS = [
