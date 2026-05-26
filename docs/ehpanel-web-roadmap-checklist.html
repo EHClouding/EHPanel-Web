@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EHPanel Web - Checklist de Integracion Real</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #111827;
+      --muted: #64748b;
+      --border: #dbe3ef;
+      --accent: #2563eb;
+      --accent-soft: #eaf1ff;
+      --done: #16a34a;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(255, 255, 255, .92);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(10px);
+    }
+    .wrap {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+    .head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 18px 0;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .counter {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    main { padding: 24px 0 48px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+      overflow: hidden;
+    }
+    section.full { grid-column: 1 / -1; }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      background: #fbfcff;
+    }
+    h2 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    ul {
+      list-style: none;
+      margin: 0;
+      padding: 8px 0;
+    }
+    li {
+      display: grid;
+      grid-template-columns: 22px 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 8px 16px;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    li:last-child { border-bottom: 0; }
+    input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      margin: 2px 0 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    label {
+      cursor: pointer;
+      display: block;
+    }
+    .item-title {
+      display: block;
+      font-weight: 650;
+    }
+    .item-note {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    li:has(input:checked) .item-title {
+      color: var(--done);
+      text-decoration: line-through;
+      text-decoration-thickness: 1px;
+    }
+    .phase {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 14px;
+      padding: 12px 16px;
+      border-bottom: 1px solid #eef2f7;
+    }
+    .phase:last-child { border-bottom: 0; }
+    .phase strong { color: var(--accent); }
+    .phase span { color: var(--muted); }
+    .tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 16px 16px;
+    }
+    button {
+      border: 1px solid var(--border);
+      background: #fff;
+      border-radius: 7px;
+      padding: 8px 10px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+    @media (max-width: 820px) {
+      .wrap { width: min(100% - 24px, 1180px); }
+      .head { align-items: flex-start; flex-direction: column; }
+      .grid { grid-template-columns: 1fr; }
+      .phase { grid-template-columns: 1fr; gap: 3px; }
+    }
+    @media print {
+      header { position: static; }
+      button { display: none; }
+      body { background: #fff; }
+      section { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap head">
+      <div>
+        <h1>EHPanel Web - Checklist de Integracion Real</h1>
+        <p class="subtitle">Seguimiento manual para conectar admin, cliente, nodo y aprovisionamiento real.</p>
+      </div>
+      <div class="counter"><strong id="doneCount">0</strong>/<span id="totalCount">0</span> completados</div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="full">
+      <div class="section-head">
+        <h2>Orden recomendado</h2>
+        <span class="badge">Ruta critica</span>
+      </div>
+      <div class="phase"><strong>Fase 1</strong><span>Conectar datos reales de sitios, dashboard cliente y jobs. Eliminar mocks visibles.</span></div>
+      <div class="phase"><strong>Fase 2</strong><span>DNS real con plantilla administrable, registros por cuenta, sincronizacion y auditoria.</span></div>
+      <div class="phase"><strong>Fase 3</strong><span>SSL, correo, bases de datos y SFTP con acciones completas desde admin y cliente.</span></div>
+      <div class="phase"><strong>Fase 4</strong><span>Aplicaciones, limites reales y pulido operacional para produccion. Backups queda post-MVP.</span></div>
+      <div class="tools">
+        <button class="primary" onclick="window.print()">Imprimir / guardar PDF</button>
+        <button onclick="document.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false); updateCount()">Limpiar ticks</button>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section>
+        <div class="section-head"><h2>1. Sitios y datos base</h2><span class="badge">Primero</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Admin: listado de Sitios con API real</span><span class="item-note">Dominio, usuario, plan, nodo, IP, estado, propietario y ultimo job.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Cliente: dashboard del sitio con API real</span><span class="item-note">Sin mockData para dominio, nodo, IP, plan, PHP, motor web y ruta home.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Normalizar estado de cuentas</span><span class="item-note">Marcar active cuando los jobs criticos terminan OK; failed solo si hay error real.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Credenciales independientes por sitio</span><span class="item-note">Usuario panel + Linux/SFTP alineados al modelo tipo cPanel.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>2. Provisionamiento y jobs</h2><span class="badge">Core</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Vista de proceso por sitio</span><span class="item-note">Usuario Linux, vhost, PHP-FPM, DNS, SSL, correo, DB y opcionales.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Reintentar paso fallido</span><span class="item-note">Boton por step con payload original y resultado visible.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Errores claros del agente</span><span class="item-note">Mostrar stderr/error_code/error_detail sin texto tecnico innecesario.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Auditoria por accion</span><span class="item-note">Quien creo, edito, reprovisiono, cambio password o sincronizo.</span></label></li>
+        </ul>
+      </section>
+
+      <section class="full">
+        <div class="section-head"><h2>3. DNS real y plantilla</h2><span class="badge">Importante</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Plantilla DNS global administrable</span><span class="item-note">Solo admin edita plantilla base para A, www, mail, MX, SPF, DMARC, DKIM, NS, FTP y autodiscover si aplica.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Variables de plantilla</span><span class="item-note">Soportar placeholders como {domain}, {ip}, {mail_host}, {selector}, {hostname}.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Aplicar plantilla al crear cuenta</span><span class="item-note">Cada hosting recibe registros iniciales desde la plantilla vigente.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Cliente edita solo sus registros</span><span class="item-note">CRUD de DNS filtrado por cuenta, sin acceso a plantilla global.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Sincronizar PowerDNS real</span><span class="item-note">Crear, editar y borrar registros en DB/API de PowerDNS, no solo en Django.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">IP desde nodo, no hardcode</span><span class="item-note">La IP publica debe salir del backend/nodo seleccionado.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">DKIM generado por nodo</span><span class="item-note">Mostrar selector y TXT DKIM para copiar a Cloudflare cuando sea necesario.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>4. SSL real</h2><span class="badge">MVP</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Estado real de certificado</span><span class="item-note">Emitido, expiracion, dominios cubiertos y ruta del certificado.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Emitir y renovar desde UI</span><span class="item-note">Cliente solicita; admin tambien puede forzar renovacion.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Errores Certbot entendibles</span><span class="item-note">DNS mal apuntado, Cloudflare, challenge 404, rate limit, email invalido.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Cloudflare nube gris primero</span><span class="item-note">Nube naranja queda documentada como caso especial.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>5. Correo real</h2><span class="badge">MVP</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Mailboxes reales</span><span class="item-note">Crear, suspender, reactivar, eliminar y cambiar password.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Cuotas por buzon</span><span class="item-note">Mostrar uso, limite y estado.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">DNS de correo visible</span><span class="item-note">MX, SPF, DKIM, DMARC y estado de validacion.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Prueba de envio/recepcion</span><span class="item-note">Boton para prueba SMTP controlada y resultado del log.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>6. Bases de datos</h2><span class="badge">MVP</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Crear DB real</span><span class="item-note">MariaDB y PostgreSQL segun soporte del nodo.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Usuarios DB y password</span><span class="item-note">Cambiar password y permisos por DB.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Eliminar DB con confirmacion</span><span class="item-note">Accion en panel + job al nodo.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Tamanos reales</span><span class="item-note">Mostrar consumo por base y total de cuenta.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>7. SFTP / archivos</h2><span class="badge">MVP</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Mostrar credenciales SFTP</span><span class="item-note">Host, usuario, puerto, ruta y comando rapido.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Cambiar password SFTP</span><span class="item-note">Debe actualizar Linux y panel si aplica.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Cuentas SFTP adicionales</span><span class="item-note">Opcional posterior, con rutas limitadas.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Validar aislamiento</span><span class="item-note">Un cliente no debe poder ver archivos de otro.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Administrador de archivos</span><span class="item-note">Navegar carpetas, editar texto, borrar, crear directorios y cambiar permisos dentro de la cuenta.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>8. Backups</h2><span class="badge">Post-MVP</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Backup local manual</span><span class="item-note">Archivos, DB, correo y DNS de la cuenta.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Listado y descarga</span><span class="item-note">Fecha, tamano, estado, tipo y retencion.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Restore controlado</span><span class="item-note">Restaurar completo o por componente.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Storage externo</span><span class="item-note">Hetzner Storage Box, S3 compatible o Backblaze se decide luego.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>9. Aplicaciones</h2><span class="badge">Importante</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">WordPress real</span><span class="item-note">Instalar, admin, DB, URL, actualizar y eliminar.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Laravel real</span><span class="item-note">Composer, .env, artisan, PHP-FPM y vhost.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Python / Django real</span><span class="item-note">Venv, gunicorn/uvicorn, systemd user, variables y logs.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">NodeJS real</span><span class="item-note">Version, npm install/build, process manager y proxy.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>10. Recursos y limites</h2><span class="badge">Planes</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">CPU real con cgroups</span><span class="item-note">Definir equivalencia: 100% = 1 vCPU o cuota configurada.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Disco real con quota</span><span class="item-note">Aplicar limite por usuario y mostrar consumo.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">RAM/procesos</span><span class="item-note">Limites por usuario o servicio segun motor.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Ancho de banda</span><span class="item-note">Medicion y limite posterior por cuenta.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>11. Admin avanzado</h2><span class="badge">Operacion</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Nodos y servicios</span><span class="item-note">Estado, reinicio, logs, version agente y capacidades.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Planes completos</span><span class="item-note">Limites, features, motor permitido, PHP permitido y correo/DB.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Revendedores</span><span class="item-note">Scope real, limites y cuentas asignadas.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Configuracion global</span><span class="item-note">Defaults de nodo, IP, DNS, SSL, correo, rutas y politicas.</span></label></li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head"><h2>12. Trabajo con Claude Code</h2><span class="badge">Paralelo</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Claude: UI worker</span><span class="item-note">Solo frontend y componentes visuales, sin tocar contratos backend salvo indicacion.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Codex: contratos y deploy</span><span class="item-note">Backend, agente, Ansible, pruebas reales, commits y despliegue.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Prompts cortos por modulo</span><span class="item-note">Una pantalla o flujo por prompt para no gastar contexto corrigiendo deriva.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Build obligatorio</span><span class="item-note">Cada entrega de Claude debe incluir npm run build y lista de archivos.</span></label></li>
+        </ul>
+      </section>
+
+      <section class="full">
+        <div class="section-head"><h2>13. Endurecimiento post-MVP</h2><span class="badge">Mejoras</span></div>
+        <ul>
+          <li><input type="checkbox"><label><span class="item-title">Auditoria detallada DNS</span><span class="item-note">Registrar quien creo, edito, borro o reaplico registros DNS y plantilla global.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Versionado de plantilla DNS</span><span class="item-note">Historial de cambios y posibilidad de revertir plantilla anterior.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Validaciones DNS avanzadas</span><span class="item-note">SRV, CAA, multiples NS/MX, prioridades, TTL permitido y formatos por tipo.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Verificacion externa de propagacion</span><span class="item-note">Consulta dig desde panel contra resolvers publicos y PowerDNS local.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Integracion Cloudflare opcional</span><span class="item-note">Publicar registros por API cuando el cliente conecte su token o cuenta Cloudflare.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Webmail propio EHPanel</span><span class="item-note">Crear webmail propio en lugar de depender de Roundcube, con diseño propio y base para integraciones futuras.</span></label></li>
+          <li><input type="checkbox"><label><span class="item-title">Adjuntos grandes via EHDrive</span><span class="item-note">Cuando un adjunto supere el limite de correo, guardarlo en el drive propio y enviar enlace con permisos exclusivos, similar a Gmail con Google Drive.</span></label></li>
+        </ul>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    function updateCount() {
+      const boxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+      const done = boxes.filter(box => box.checked).length;
+      document.getElementById('doneCount').textContent = done;
+      document.getElementById('totalCount').textContent = boxes.length;
+    }
+    document.addEventListener('change', event => {
+      if (event.target.matches('input[type="checkbox"]')) updateCount();
+    });
+    updateCount();
+  </script>
+</body>
+</html>
