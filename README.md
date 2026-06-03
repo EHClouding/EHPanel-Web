@@ -136,6 +136,7 @@ El archivo real en produccion vive normalmente en:
 | Variable | Ejemplo | Descripcion |
 | --- | --- | --- |
 | `DEBUG` | `false` | Siempre `false` en produccion. |
+| `APP_VERSION` | `1.0.0` | Version del panel reportada a Core y Billing. |
 | `SECRET_KEY` | valor aleatorio largo | Clave Django. Debe rotarse por servidor. |
 | `ALLOWED_HOSTS` | `web01.ehclouding.com,localhost,127.0.0.1` | Hosts aceptados por Django. |
 | `CSRF_TRUSTED_ORIGINS` | `https://web01.ehclouding.com` | Origen HTTPS del panel. |
@@ -144,6 +145,10 @@ El archivo real en produccion vive normalmente en:
 | `INTERNAL_BILLING_API_TOKEN` | token compartido | Token que Billing usa contra Web. |
 | `BILLING_API_BASE` | `https://billing.ehclouding.com/api/v1` | API saliente hacia Billing, si aplica. |
 | `BILLING_API_TOKEN` | token billing | Token saliente hacia Billing, si aplica. |
+| `CORE_API_USER` | `ehpanel-core` | Usuario API que Core usara contra este nodo. |
+| `CORE_API_KEY` | token largo unico | Clave API compartida solo con Core. |
+| `CORE_ALLOW_DEPLOY` | `false` | Permite que Core ejecute deploy remoto si esta en `true`. |
+| `CORE_DEPLOY_SCRIPT` | `/opt/ehpanel/web/scripts/deploy.sh` | Script permitido para deploy remoto cuando `CORE_ALLOW_DEPLOY=true`. |
 | `HOSTING_PROVISIONING_MODE` | `local` | Debe ser `local` en el modelo por nodo. |
 | `HOSTING_DEFAULT_WEB_ENGINE` | `openlitespeed` | Motor por defecto. |
 | `LOCAL_PANEL_HOSTNAME` | `web01.ehclouding.com` | Identidad del nodo. |
@@ -223,6 +228,11 @@ Variables importantes del rol `ehpanel_web_panel`:
 | `ehpanel_web_panel_database_url` | Conexion PostgreSQL del panel. |
 | `ehpanel_web_panel_redis_url` | Conexion Valkey/Redis. |
 | `ehpanel_web_panel_billing_token` | Token compartido con Billing. |
+| `ehpanel_web_panel_app_version` | Version de EHPanel Web reportada a Core. |
+| `ehpanel_web_panel_core_api_user` | Usuario API para Core. |
+| `ehpanel_web_panel_core_api_key` | Clave API para Core. Debe ir en vault. |
+| `ehpanel_web_panel_core_allow_deploy` | Activa o bloquea deploy remoto desde Core. |
+| `ehpanel_web_panel_core_deploy_script` | Script ejecutable si se habilita deploy remoto. |
 | `ehpanel_web_panel_local_public_ip` | IP publica del nodo. |
 | `ehpanel_web_panel_provision_dns` | Activa provisionamiento DNS local. |
 | `ehpanel_web_panel_provision_ssl` | Activa provisionamiento SSL local. |
@@ -389,6 +399,59 @@ Authorization: Bearer INTERNAL_BILLING_API_TOKEN
 
 o el esquema soportado por el cliente Billing configurado. El token debe ser
 un secreto compartido unico por entorno.
+
+## Contrato Core
+
+EHPanel Core no provisiona cuentas web, pero puede registrar y verificar cada
+nodo EHPanel Web con una API tecnica independiente de Billing.
+
+Para `web01.ehclouding.com`, los datos que Core debe guardar son:
+
+| Campo Core | Valor |
+| --- | --- |
+| API URL | `https://web01.ehclouding.com/api/v1/core` |
+| WSS URL | `wss://web01.ehclouding.com/ws/core/` |
+| API USER | Valor de `CORE_API_USER` en el nodo. |
+| API KEY | Valor de `CORE_API_KEY` en el nodo. |
+| Version panel Web | Valor de `APP_VERSION` en el nodo. |
+
+Endpoints:
+
+| Endpoint | Metodo | Uso |
+| --- | --- | --- |
+| `/api/v1/core/verify/` | GET/POST | Verificacion de identidad y version del nodo. |
+| `/api/v1/core/status/` | GET | Telemetria local, servicios y resumen de cuentas. |
+| `/api/v1/core/deploy/` | POST | Recibe orden de deploy desde Core. Por defecto no ejecuta scripts. |
+| `/ws/core/` | WSS | Canal de handshake/estado para Core. |
+
+Autenticacion:
+
+```http
+X-API-User: CORE_API_USER
+X-API-Key: CORE_API_KEY
+Authorization: Bearer CORE_API_KEY
+```
+
+Core puede enviar `X-API-Key` o `Authorization: Bearer`. El usuario debe
+coincidir con `CORE_API_USER`.
+
+El deploy remoto queda bloqueado salvo que se configure:
+
+```text
+CORE_ALLOW_DEPLOY=true
+CORE_DEPLOY_SCRIPT=/opt/ehpanel/web/scripts/deploy.sh
+```
+
+En el estado normal recomendado para produccion inicial, Core verifica y
+monitorea, pero no actualiza el nodo automaticamente.
+
+Prueba rapida desde Core o desde una terminal autorizada:
+
+```bash
+curl -fsS https://web01.ehclouding.com/api/v1/core/verify/ \
+  -H "X-API-User: ${CORE_API_USER}" \
+  -H "X-API-Key: ${CORE_API_KEY}"
+```
 
 ## Provisionamiento local
 

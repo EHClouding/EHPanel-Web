@@ -5,6 +5,7 @@ from django.urls import include, path, re_path
 from rest_framework.routers import DefaultRouter
 
 from ehpanel_web.auth_views import EHPanelTokenRefreshView, EHPanelTokenView, MeView
+from ehpanel_web.core_integration import CoreDeployView, CoreStatusView, CoreVerifyView
 from ehpanel_web.user_views import AccessSecurityViewSet, AccessSessionViewSet, GroupViewSet, PermissionViewSet, UserViewSet
 from agents.views import ops_dashboard
 from hosting.views import AuditLogViewSet, MailAutoconfigView, MailAutodiscoverView, MailMobileconfigView
@@ -50,6 +51,9 @@ urlpatterns = [
     path("api/integrations/billing/", include("hosting.billing_urls")),
     path("api/v1/billing/", include("hosting.billing_urls")),
     path("api/billing/", include("hosting.billing_urls")),
+    path("api/v1/core/verify/", CoreVerifyView.as_view()),
+    path("api/v1/core/status/", CoreStatusView.as_view()),
+    path("api/v1/core/deploy/", CoreDeployView.as_view()),
     path("api/", include("hosting.app_urls")),
     path("api/hosting/", include("hosting.urls")),
     path(".well-known/autoconfig/mail/config-v1.1.xml", MailAutoconfigView.as_view()),

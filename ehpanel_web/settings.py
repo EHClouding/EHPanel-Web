@@ -12,6 +12,7 @@ if os.environ.get("ENV_FILE"):
 load_dotenv(BASE_DIR / ".env")
 
 DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
+APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
 
 SECRET_KEY = os.environ.get("SECRET_KEY")
 if not SECRET_KEY:
@@ -40,6 +41,10 @@ INTERNAL_BILLING_API_TOKEN = os.environ.get("INTERNAL_BILLING_API_TOKEN", "")
 BILLING_WEBHOOK_TOKEN = os.environ.get("BILLING_WEBHOOK_TOKEN", "")
 BILLING_API_BASE = os.environ.get("BILLING_API_BASE", "https://panel.ehclouding.com/api/v1")
 BILLING_API_TOKEN = os.environ.get("BILLING_API_TOKEN", "")
+CORE_API_USER = os.environ.get("CORE_API_USER", "")
+CORE_API_KEY = os.environ.get("CORE_API_KEY", "")
+CORE_ALLOW_DEPLOY = os.environ.get("CORE_ALLOW_DEPLOY", "false").lower() == "true"
+CORE_DEPLOY_SCRIPT = os.environ.get("CORE_DEPLOY_SCRIPT", "")
 
 HOSTING_PROVISIONING_MODE = os.environ.get("HOSTING_PROVISIONING_MODE", "local").strip().lower()
 HOSTING_DEFAULT_WEB_ENGINE = os.environ.get("HOSTING_DEFAULT_WEB_ENGINE", "openlitespeed").strip().lower()
@@ -178,6 +183,7 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("DRF_ANON_THROTTLE_RATE", "20/minute"),
+        "core": os.environ.get("DRF_CORE_THROTTLE_RATE", "120/minute"),
         "login": os.environ.get("DRF_LOGIN_THROTTLE_RATE", "5/minute"),
         "user": os.environ.get("DRF_USER_THROTTLE_RATE", "120/minute"),
     },
