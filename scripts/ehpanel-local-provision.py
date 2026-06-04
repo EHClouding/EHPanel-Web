@@ -389,6 +389,91 @@ server {{
     return target
 
 
+def ensure_acme_bootstrap_certificate():
+    cert_dir = Path("/etc/ehpanel/acme-bootstrap")
+    key = cert_dir / "bootstrap.key"
+    cert = cert_dir / "bootstrap.crt"
+    if key.exists() and cert.exists():
+        return cert, key
+    cert_dir.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-nodes",
+            "-newkey",
+            "rsa:2048",
+            "-days",
+            "14",
+            "-subj",
+            "/CN=ehpanel-acme-bootstrap",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+        ]
+    )
+    key.chmod(0o600)
+    cert.chmod(0o644)
+    return cert, key
+
+
+def write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root="public_html"):
+    nginx_dir = Path(settings["nginx_vhosts_dir"])
+    nginx_dir.mkdir(parents=True, exist_ok=True)
+    docroot = account_document_root(username, settings, document_root)
+    backend = f"http://127.0.0.1:{int(settings['ols_backend_port'])}"
+    log_name = safe_vhost_name(domain)
+    cert, key = ensure_acme_bootstrap_certificate()
+    app_include = nginx_app_include_line(domain)
+    config = f"""server {{
+    listen 80;
+    server_name {domain} www.{domain};
+    access_log /var/log/nginx/ehpanel-{log_name}-access.log;
+    error_log /var/log/nginx/ehpanel-{log_name}-error.log;
+    location ^~ /.well-known/acme-challenge/ {{
+        alias {docroot}/.well-known/acme-challenge/;
+        default_type text/plain;
+    }}
+{nginx_mail_autoconfig_locations(settings)}
+{app_include}
+    location / {{
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass {backend};
+    }}
+}}
+server {{
+    listen 443 ssl;
+    http2 on;
+    server_name {domain} www.{domain};
+    ssl_certificate {cert};
+    ssl_certificate_key {key};
+    access_log /var/log/nginx/ehpanel-{log_name}-ssl-access.log;
+    error_log /var/log/nginx/ehpanel-{log_name}-ssl-error.log;
+    location ^~ /.well-known/acme-challenge/ {{
+        alias {docroot}/.well-known/acme-challenge/;
+        default_type text/plain;
+    }}
+{nginx_mail_autoconfig_locations(settings, "https")}
+{app_include}
+    location / {{
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_pass {backend};
+    }}
+}}
+"""
+    target = nginx_dir / f"ehpanel-{safe_vhost_name(domain)}.conf"
+    target.write_text(config, encoding="utf-8")
+    return target
+
+
 def write_mail_autoconfig_nginx_proxy(domain, username, settings, ssl=False):
     nginx_dir = Path(settings["nginx_vhosts_dir"])
     nginx_dir.mkdir(parents=True, exist_ok=True)
@@ -772,7 +857,11 @@ def issue_ssl(payload, settings):
     Path(webroot, ".well-known", "acme-challenge").mkdir(parents=True, exist_ok=True)
     run(["chown", "-R", f"{username}:{username}", webroot], check=False)
     ensure_web_accessible_path(Path(settings["home_root"]) / username, Path(webroot))
-    write_nginx_proxy(domain, username, settings, ssl=False, document_root=document_root)
+    cert_dir = Path("/etc/letsencrypt/live") / domain
+    if (cert_dir / "fullchain.pem").exists() and (cert_dir / "privkey.pem").exists():
+        write_nginx_proxy(domain, username, settings, ssl=True, document_root=document_root)
+    else:
+        write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root=document_root)
     run(["nginx", "-t"])
     run(["systemctl", "reload", "nginx"], check=False)
     if not dns_has_public_answer(domain):
@@ -809,7 +898,6 @@ def issue_ssl(payload, settings):
     write_webmail_nginx_proxy(domain, username, settings, ssl=True)
     run(["nginx", "-t"])
     run(["systemctl", "reload", "nginx"], check=False)
-    cert_dir = Path("/etc/letsencrypt/live") / domain
     fullchain = cert_dir / "fullchain.pem"
     not_after = ""
     dns_names = [domain, *requested_aliases]
