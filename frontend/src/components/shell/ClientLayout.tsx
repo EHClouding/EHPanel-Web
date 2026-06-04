@@ -28,6 +28,7 @@ import {
 import type { LucideIcon } from "lucide-react"
 import { useEffect, useState } from "react"
 
+import type { CurrentUser } from "@/api/auth"
 import { hostingApi, type GlobalAnnouncement } from "@/api/hosting"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -51,6 +52,7 @@ import { SitesPage } from "@/pages/SitesPage"
 import { SoftwarePage } from "@/pages/SoftwarePage"
 
 type ClientLayoutProps = {
+  currentUser: CurrentUser | null
   onLogout: () => void
 }
 
@@ -103,9 +105,10 @@ const accountMenu: MenuItem[] = [
   { label: "Perfil", icon: UserRound },
 ]
 
-export function ClientLayout({ onLogout }: ClientLayoutProps) {
+export function ClientLayout({ currentUser, onLogout }: ClientLayoutProps) {
   const [activeView, setActiveView] = useState<ClientView>("Inicio")
   const [announcements, setAnnouncements] = useState<GlobalAnnouncement[]>([])
+  const [clientName, setClientName] = useState(displayUserName(currentUser))
   const [primaryDomain, setPrimaryDomain] = useState("Cargando dominio...")
   const [showAnnouncements, setShowAnnouncements] = useState(false)
   const isAdminView = window.sessionStorage.getItem("eh_admin_view_account")
@@ -120,6 +123,7 @@ export function ClientLayout({ onLogout }: ClientLayoutProps) {
 
         const account = page.results.find((item) => item.status === "active") ?? page.results[0]
         setPrimaryDomain(account?.primary_domain || "Sin dominio principal")
+        setClientName(displayUserName(currentUser) || account?.customer_name || account?.customer_email || account?.username || "Cliente")
       })
       .catch(() => {
         if (mounted) setPrimaryDomain("Sin dominio principal")
@@ -137,7 +141,7 @@ export function ClientLayout({ onLogout }: ClientLayoutProps) {
     return () => {
       mounted = false
     }
-  }, [])
+  }, [currentUser])
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-950">
@@ -230,9 +234,9 @@ export function ClientLayout({ onLogout }: ClientLayoutProps) {
               ) : null}
             </div>
             <div className="ml-1 hidden items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 md:flex">
-              <div className="grid h-6 w-6 place-items-center rounded bg-primary text-xs font-bold text-white">CL</div>
+              <div className="grid h-6 w-6 place-items-center rounded bg-primary text-xs font-bold text-white">{initialsFrom(clientName)}</div>
               <div className="text-xs">
-                <div className="font-semibold leading-4">Cliente Demo</div>
+                <div className="max-w-[180px] truncate font-semibold leading-4">{clientName || "Cliente"}</div>
                 <div className="text-slate-500">Cuenta activa</div>
               </div>
             </div>
@@ -283,6 +287,20 @@ export function ClientLayout({ onLogout }: ClientLayoutProps) {
       </div>
     </div>
   )
+}
+
+function displayUserName(user: CurrentUser | null) {
+  if (!user) return ""
+  return [user.first_name, user.last_name].map((value) => value.trim()).filter(Boolean).join(" ") || user.username || user.email || ""
+}
+
+function initialsFrom(value: string) {
+  const parts = value
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  if (!parts.length) return "CL"
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "CL"
 }
 
 function MenuSection({

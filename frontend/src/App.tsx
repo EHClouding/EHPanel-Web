@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 
-import { authApi, normalizeRole, type UserRole } from "@/api/auth"
+import { authApi, normalizeRole, type CurrentUser, type UserRole } from "@/api/auth"
 import { SESSION_EXPIRED_EVENT } from "@/api/client"
 import { AdminLayout } from "@/components/shell/AdminLayout"
 import { ClientLayout } from "@/components/shell/ClientLayout"
@@ -10,12 +10,14 @@ import { LoginPage } from "@/pages/LoginPage"
 export default function App() {
   const [activeRole, setActiveRole] = useState<UserRole>("client")
   const [authState, setAuthState] = useState<"checking" | "guest" | "ready">("checking")
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null)
 
   useEffect(() => {
     authApi
       .me()
       .then((user) => {
         const role = normalizeRole(user)
+        setCurrentUser(user)
         setActiveRole(
           role === "admin" && sessionStorage.getItem("eh_admin_view_account")
             ? "client"
@@ -30,6 +32,7 @@ export default function App() {
 
   const logout = useCallback(() => {
     authApi.logout()
+    setCurrentUser(null)
     sessionStorage.removeItem("eh_admin_view_account")
     sessionStorage.removeItem("eh_admin_view_reseller")
     sessionStorage.removeItem("eh_admin_original_access")
@@ -58,6 +61,7 @@ export default function App() {
       <LoginPage
         onLogin={async ({ password, username }) => {
           const user = await authApi.login(username, password)
+          setCurrentUser(user)
           setActiveRole(normalizeRole(user))
           setAuthState("ready")
         }}
@@ -73,5 +77,5 @@ export default function App() {
     return <AdminLayout onLogout={logout} />
   }
 
-  return <ClientLayout onLogout={logout} />
+  return <ClientLayout currentUser={currentUser} onLogout={logout} />
 }
