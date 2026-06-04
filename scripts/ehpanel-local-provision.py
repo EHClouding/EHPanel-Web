@@ -128,6 +128,18 @@ def safe_vhost_name(domain):
     return re.sub(r"[^a-z0-9_.-]", "_", domain.lower())
 
 
+def acme_challenge_root(domain, settings=None):
+    base = Path((settings or {}).get("acme_challenges_root") or "/var/www/ehpanel-acme")
+    root = (base / safe_vhost_name(validate_domain(domain))).resolve(strict=False)
+    if os.path.commonpath([str(base.resolve(strict=False)), str(root)]) != str(base.resolve(strict=False)):
+        raise ValueError("Ruta ACME fuera del directorio permitido.")
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o755)
+    if shutil.which("restorecon"):
+        run(["restorecon", "-RF", str(root)], check=False)
+    return root
+
+
 def account_document_root(username, settings, document_root="public_html"):
     home = (Path(settings["home_root"]) / username).resolve(strict=False)
     relative = str(document_root or "public_html").strip().strip("/").replace("\\", "/")
@@ -340,6 +352,7 @@ def write_nginx_proxy(domain, username, settings, ssl=False, document_root="publ
     nginx_dir.mkdir(parents=True, exist_ok=True)
     home = Path(settings["home_root"]) / username
     docroot = account_document_root(username, settings, document_root)
+    acme_root = acme_challenge_root(domain, settings)
     backend = f"http://127.0.0.1:{int(settings['ols_backend_port'])}"
     log_name = safe_vhost_name(domain)
     cert_lines = ""
@@ -356,7 +369,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-ssl-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-ssl-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {docroot}/.well-known/acme-challenge/;
+        alias {acme_root}/;
         default_type text/plain;
     }}
 {nginx_mail_autoconfig_locations(settings, "https")}
@@ -376,7 +389,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {docroot}/.well-known/acme-challenge/;
+        alias {acme_root}/;
         default_type text/plain;
     }}
 {nginx_mail_autoconfig_locations(settings)}
@@ -431,6 +444,7 @@ def write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root="
     nginx_dir = Path(settings["nginx_vhosts_dir"])
     nginx_dir.mkdir(parents=True, exist_ok=True)
     docroot = account_document_root(username, settings, document_root)
+    acme_root = acme_challenge_root(domain, settings)
     backend = f"http://127.0.0.1:{int(settings['ols_backend_port'])}"
     log_name = safe_vhost_name(domain)
     cert, key = ensure_acme_bootstrap_certificate()
@@ -441,7 +455,7 @@ def write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root="
     access_log /var/log/nginx/ehpanel-{log_name}-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {docroot}/.well-known/acme-challenge/;
+        alias {acme_root}/;
         default_type text/plain;
     }}
 {nginx_mail_autoconfig_locations(settings)}
@@ -463,7 +477,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-ssl-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-ssl-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {docroot}/.well-known/acme-challenge/;
+        alias {acme_root}/;
         default_type text/plain;
     }}
 {nginx_mail_autoconfig_locations(settings, "https")}
@@ -860,11 +874,9 @@ def issue_ssl(payload, settings):
     domain = validate_domain(payload["domain"])
     username = payload["username"]
     document_root = payload.get("document_root") or "public_html"
-    webroot = str(account_document_root(username, settings, document_root))
-    Path(webroot).mkdir(parents=True, exist_ok=True)
-    Path(webroot, ".well-known", "acme-challenge").mkdir(parents=True, exist_ok=True)
-    run(["chown", "-R", f"{username}:{username}", webroot], check=False)
-    ensure_web_accessible_path(Path(settings["home_root"]) / username, Path(webroot))
+    document_webroot = account_document_root(username, settings, document_root)
+    ensure_web_accessible_path(Path(settings["home_root"]) / username, document_webroot)
+    webroot = str(acme_challenge_root(domain, settings))
     cert_dir = Path("/etc/letsencrypt/live") / domain
     if (cert_dir / "fullchain.pem").exists() and (cert_dir / "privkey.pem").exists():
         write_nginx_proxy(domain, username, settings, ssl=True, document_root=document_root)
