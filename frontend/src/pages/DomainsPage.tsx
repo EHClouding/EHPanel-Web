@@ -5,6 +5,7 @@ import {
   Copy,
   Folder,
   FolderOpen,
+  FolderPlus,
   ExternalLink,
   Filter,
   Globe2,
@@ -97,20 +98,22 @@ export function DomainsPage() {
   }, [domains, query, statusFilter, typeFilter])
 
   const addDomain = async () => {
-    if (!form.account || !form.domain.trim() || !form.root.trim()) return
+    const documentRoot = sanitizeDocumentRoot(form.root || rootPlaceholder)
+    if (!form.account || !form.domain.trim() || !documentRoot) return
 
     setError("")
     setMessage("")
     setIsSaving(true)
 
     try {
+      await ensureAccountDirectory(form.account, documentRoot)
       await hostingApi.createDomain({
         account: form.account,
-        document_root: form.root.trim().replace(/^\/+/, ""),
+        document_root: documentRoot,
         domain: form.domain.trim(),
         domain_type: toApiDomainType(form.type),
       })
-      setMessage("Dominio agregado y tarea de sincronizacion enviada.")
+      setMessage("Carpeta creada. Dominio agregado y tarea de sincronizacion enviada.")
       setForm({ account: form.account, domain: "", type: "Subdominio", root: "" })
       setIsCreateOpen(false)
       await loadDomains()
@@ -489,7 +492,7 @@ export function DomainsPage() {
                 <Button onClick={() => setIsCreateOpen(false)} size="sm" type="button" variant="outline">
                   Cancelar
                 </Button>
-                <Button disabled={isSaving || !form.account || !form.domain.trim() || !form.root.trim()} size="sm" type="submit">
+                <Button disabled={isSaving || !form.account || !form.domain.trim()} size="sm" type="submit">
                   {isSaving ? "Guardando..." : "Agregar dominio"}
                 </Button>
               </div>
@@ -527,47 +530,73 @@ function DirectoryPicker({
   const [currentPath, setCurrentPath] = useState("/")
   const [folders, setFolders] = useState<FileManagerItem[]>([])
   const [directoryQuery, setDirectoryQuery] = useState("")
+  const [newFolderName, setNewFolderName] = useState("")
   const [isLoading, setIsLoading] = useState(true)
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
   const filteredDirectories = folders.filter((item) =>
     `${item.name} ${item.path}`.toLowerCase().includes(directoryQuery.toLowerCase()),
   )
   const parentPath = currentPath === "/" ? "/" : normalizeDirectoryPath(currentPath.split("/").slice(0, -1).join("/") || "/")
   const canSelectCurrent = currentPath !== "/"
 
+  const loadFolders = async (isMounted = () => true) => {
+    if (!accountId) {
+      if (isMounted()) {
+        setFolders([])
+        setIsLoading(false)
+      }
+      return
+    }
+    setError("")
+    setIsLoading(true)
+
+    try {
+      const response = await hostingApi.fileList(accountId, currentPath)
+      const completed = await waitDirectoryResult(response.job, response)
+      const items = extractDirectoryItems(completed).filter((item) => item.type === "dir")
+      if (isMounted()) setFolders(items)
+    } catch (loadError) {
+      if (isMounted()) {
+        setError(readMessage(loadError))
+        setFolders([])
+      }
+    } finally {
+      if (isMounted()) setIsLoading(false)
+    }
+  }
+
   useEffect(() => {
     let mounted = true
 
-    async function loadFolders() {
-      if (!accountId) {
-        setFolders([])
-        setIsLoading(false)
-        return
-      }
-      setError("")
-      setIsLoading(true)
-
-      try {
-        const response = await hostingApi.fileList(accountId, currentPath)
-        const completed = await waitDirectoryResult(response.job, response)
-        const items = extractDirectoryItems(completed).filter((item) => item.type === "dir")
-        if (mounted) setFolders(items)
-      } catch (loadError) {
-        if (mounted) {
-          setError(readMessage(loadError))
-          setFolders([])
-        }
-      } finally {
-        if (mounted) setIsLoading(false)
-      }
-    }
-
-    void loadFolders()
+    void loadFolders(() => mounted)
 
     return () => {
       mounted = false
     }
   }, [accountId, currentPath])
+
+  const createFolder = async () => {
+    const folderName = sanitizePathSegment(newFolderName).replace(/\./g, "_")
+    if (!accountId || !folderName) return
+    const targetPath = joinDirectoryPath(currentPath, folderName)
+    setError("")
+    setNotice("")
+    setIsCreatingFolder(true)
+
+    try {
+      await ensureAccountDirectory(accountId, toRelativeDirectory(targetPath))
+      setNotice(`Carpeta creada: ${toRelativeDirectory(targetPath)}`)
+      setNewFolderName("")
+      setCurrentPath(targetPath)
+    } catch (createError) {
+      setError(readMessage(createError))
+      await loadFolders()
+    } finally {
+      setIsCreatingFolder(false)
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-950/55 px-4">
@@ -598,11 +627,30 @@ function DirectoryPicker({
             <Search className="h-4 w-4" />
             <input className="h-full min-w-0 flex-1 bg-transparent outline-none" onChange={(event) => setDirectoryQuery(event.target.value)} placeholder="Buscar carpeta" value={directoryQuery} />
           </div>
+          <form
+            className="mt-2 flex gap-2"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void createFolder()
+            }}
+          >
+            <input
+              className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              onChange={(event) => setNewFolderName(event.target.value)}
+              placeholder="Nueva carpeta"
+              value={newFolderName}
+            />
+            <Button disabled={isCreatingFolder || !sanitizePathSegment(newFolderName)} size="sm" type="submit" variant="outline">
+              <FolderPlus className="h-4 w-4" />
+              Crear
+            </Button>
+          </form>
         </div>
 
         <div className="max-h-[330px] overflow-y-auto p-3">
           <div className="space-y-1">
             {error ? <Notice tone="error" text={error} /> : null}
+            {notice ? <Notice tone="success" text={notice} /> : null}
             {isLoading ? <div className="py-8 text-center text-sm font-semibold text-slate-500">Cargando carpetas...</div> : null}
             {!isLoading && !filteredDirectories.length && !error ? (
               <div className="py-8 text-center text-sm font-semibold text-slate-500">No hay carpetas en esta ruta.</div>
@@ -830,7 +878,8 @@ async function waitDirectoryResult(
   jobId: string,
   initial: { job: string; result?: unknown; status: string; items?: FileManagerItem[] },
 ) {
-  if (initial.status === "success" || initial.status === "failed" || Array.isArray(initial.items)) return initial
+  if (initial.status === "failed") throw new Error(readDirectoryJobError(initial))
+  if (initial.status === "success" || Array.isArray(initial.items)) return initial
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 700))
@@ -848,6 +897,22 @@ async function waitDirectoryResult(
   return initial
 }
 
+async function ensureAccountDirectory(accountId: string, path: string) {
+  const target = validateDocumentRoot(path)
+  const response = await hostingApi.fileMkdir(accountId, target)
+  const completed = await waitDirectoryResult(response.job, response)
+  if (completed.status === "failed") throw new Error(readDirectoryJobError(completed))
+  return completed
+}
+
+function readDirectoryJobError(response: { result?: unknown }) {
+  if (isRecord(response.result)) {
+    const detail = response.result.detail || response.result.error_detail || response.result.error_code
+    if (typeof detail === "string" && detail.trim()) return detail
+  }
+  return "No se pudo crear o leer la carpeta."
+}
+
 function extractDirectoryItems(response: { items?: FileManagerItem[]; result?: unknown }) {
   if (Array.isArray(response.items)) return response.items
   if (isRecord(response.result) && Array.isArray(response.result.items)) return response.result.items as FileManagerItem[]
@@ -862,6 +927,28 @@ function normalizeDirectoryPath(path: string) {
 
 function toRelativeDirectory(path: string) {
   return normalizeDirectoryPath(path).replace(/^\/+/, "")
+}
+
+function sanitizeDocumentRoot(path: string) {
+  return path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+}
+
+function validateDocumentRoot(path: string) {
+  const target = sanitizeDocumentRoot(path)
+  if (!target) throw new Error("La carpeta destino es requerida.")
+  if (target.split("/").some((segment) => segment === "." || segment === "..")) {
+    throw new Error("La carpeta debe ser relativa a la cuenta y no puede contener . ni ..")
+  }
+  return target
+}
+
+function joinDirectoryPath(basePath: string, folderName: string) {
+  return normalizeDirectoryPath(`${normalizeDirectoryPath(basePath).replace(/\/$/, "")}/${folderName}`)
 }
 
 function suggestedDocumentRoot(type: Exclude<DomainType, "Principal">, domain: string, primaryDomain?: string) {

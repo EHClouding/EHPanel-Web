@@ -1995,6 +1995,14 @@ def create_domain(account, domain, public_ip, domain_type=None, document_root=""
                     {"content": target_ip, "ttl": 300, "priority": None},
                 )
                 sync_domain_dns(parent_domain)
+        queue_account_job(
+            account,
+            AgentJob.Type.FILE_MKDIR,
+            {
+                "username": account.username,
+                "path": document_root,
+            },
+        )
         job_type = (
             AgentJob.Type.PROVISION_OPENLITESPEED_HOSTING
             if account.web_engine == HostingAccount.WebEngine.OPENLITESPEED
