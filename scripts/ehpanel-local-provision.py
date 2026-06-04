@@ -129,7 +129,24 @@ def account_document_root(username, settings, document_root="public_html"):
     if os.path.commonpath([str(home), str(target)]) != str(home):
         raise ValueError("Document root fuera de la cuenta.")
     target.mkdir(parents=True, exist_ok=True)
+    ensure_web_accessible_path(home, target)
     return target
+
+
+def ensure_web_accessible_path(home, target):
+    home = Path(home)
+    target = Path(target)
+    if home.exists():
+        home.chmod(0o751)
+    current = home
+    try:
+        relative_parts = target.relative_to(home).parts
+    except ValueError:
+        relative_parts = ()
+    for part in relative_parts:
+        current = current / part
+        if current.exists() and current.is_dir():
+            current.chmod(0o755)
 
 
 def safe_mail_local(local):
@@ -656,6 +673,35 @@ def dns_has_public_answer(domain):
         return False
 
 
+def verify_acme_http_challenge(domain, webroot):
+    challenge_dir = Path(webroot) / ".well-known" / "acme-challenge"
+    challenge_dir.mkdir(parents=True, exist_ok=True)
+    for path in [Path(webroot), challenge_dir.parent, challenge_dir]:
+        if path.exists() and path.is_dir():
+            path.chmod(0o755)
+    token = f"ehpanel-{secrets.token_hex(12)}"
+    expected = f"ehpanel-acme-ok-{secrets.token_hex(12)}"
+    probe = challenge_dir / token
+    probe.write_text(expected, encoding="utf-8")
+    probe.chmod(0o644)
+    url = f"http://{domain}/.well-known/acme-challenge/{token}"
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "EHPanel-ACME-Probe/1.0"})
+        with urllib.request.urlopen(request, timeout=12) as response:
+            status = int(getattr(response, "status", 0) or response.getcode())
+            final_url = response.geturl()
+            body = response.read(4096).decode(errors="replace").strip()
+        if status < 200 or status >= 300:
+            return False, f"ACME HTTP-01 no accesible: HTTP {status}, url_final={final_url}"
+        if body != expected:
+            return False, f"ACME HTTP-01 responde contenido inesperado: url_final={final_url}, respuesta={body[:180]!r}"
+        return True, "ok"
+    except Exception as exc:
+        return False, f"ACME HTTP-01 no accesible en {url}: {exc}"
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 def provision_hosting(payload, settings):
     username = payload["username"]
     domain = validate_domain(payload["domain"])
@@ -720,12 +766,26 @@ def issue_ssl(payload, settings):
         return fail("CERTBOT_NOT_FOUND", "certbot no esta instalado.")
     domain = validate_domain(payload["domain"])
     username = payload["username"]
-    webroot = str(account_document_root(username, settings, payload.get("document_root") or "public_html"))
+    document_root = payload.get("document_root") or "public_html"
+    webroot = str(account_document_root(username, settings, document_root))
     Path(webroot).mkdir(parents=True, exist_ok=True)
     Path(webroot, ".well-known", "acme-challenge").mkdir(parents=True, exist_ok=True)
     run(["chown", "-R", f"{username}:{username}", webroot], check=False)
+    ensure_web_accessible_path(Path(settings["home_root"]) / username, Path(webroot))
+    write_nginx_proxy(domain, username, settings, ssl=False, document_root=document_root)
+    run(["nginx", "-t"])
+    run(["systemctl", "reload", "nginx"], check=False)
     if not dns_has_public_answer(domain):
         return fail("SSL_DNS_NOT_FOUND", f"El dominio {domain} no tiene DNS publico A/AAAA para emitir SSL.")
+    probe_ok, probe_detail = verify_acme_http_challenge(domain, webroot)
+    if not probe_ok:
+        return fail(
+            "SSL_ACME_HTTP01_NOT_REACHABLE",
+            probe_detail,
+            domain=domain,
+            webroot=webroot,
+            hint="Verifica que el DNS apunte al nodo, que Cloudflare no fuerce HTTPS/redirects para /.well-known/acme-challenge/ y que el vhost HTTP responda desde este servidor.",
+        )
     requested_aliases = []
     skipped_aliases = []
     for alias in payload.get("aliases") or []:
