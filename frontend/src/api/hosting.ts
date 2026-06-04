@@ -1,4 +1,4 @@
-import { apiFetch, tokenStorage } from "@/api/client"
+import { apiFetch, rawApiRequest, tokenStorage, type UploadProgress } from "@/api/client"
 
 const BASE_URL = import.meta.env.VITE_API_URL ?? ""
 
@@ -2466,6 +2466,18 @@ export const hostingApi = {
     return apiFetch<FileListResponse>(`/hosting/accounts/${accountId}/files/upload/`, {
       body: data,
       method: "POST",
+    })
+  },
+
+  fileUploadWithProgress: (accountId: string, path: string, file: File, overwrite = true, onProgress?: (progress: UploadProgress) => void) => {
+    const data = new FormData()
+    data.set("file", file)
+    data.set("path", path)
+    data.set("overwrite", String(overwrite))
+    return rawApiRequest<FileListResponse>(`/hosting/accounts/${accountId}/files/upload/`, {
+      body: data,
+      method: "POST",
+      onProgress,
     })
   },
 

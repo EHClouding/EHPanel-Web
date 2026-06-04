@@ -33,6 +33,12 @@ type RequestOptions = RequestInit & {
   retry?: boolean
 }
 
+export type UploadProgress = {
+  loaded: number
+  percent: number
+  total: number
+}
+
 export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const response = await rawFetch(path, options)
 
@@ -61,6 +67,77 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   }
 
   return response.json() as Promise<T>
+}
+
+export function rawApiRequest<T>(
+  path: string,
+  options: {
+    body?: XMLHttpRequestBodyInit | null
+    method?: string
+    onProgress?: (progress: UploadProgress) => void
+  } = {},
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const url = `${BASE_URL}/api${path}`
+    xhr.open(options.method ?? "GET", url)
+
+    const token = tokenStorage.getAccess()
+    if (token) {
+      xhr.setRequestHeader("Authorization", `Bearer ${token}`)
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        options.onProgress?.({ loaded: event.loaded, percent: 0, total: 0 })
+        return
+      }
+      options.onProgress?.({
+        loaded: event.loaded,
+        percent: Math.max(0, Math.min(100, Math.round((event.loaded / event.total) * 100))),
+        total: event.total,
+      })
+    }
+
+    xhr.onerror = () => reject(new ApiError(0, `No se pudo conectar con el servidor (${url}).`))
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        reject(new ApiError(401, "Tu sesion expiro. Inicia sesion nuevamente."))
+        return
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new ApiError(xhr.status, readXhrError(xhr)))
+        return
+      }
+      if (xhr.status === 204 || !xhr.responseText) {
+        resolve(undefined as T)
+        return
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText) as T)
+      } catch {
+        reject(new ApiError(xhr.status, "Respuesta invalida del servidor."))
+      }
+    }
+    xhr.send(options.body ?? null)
+  })
+}
+
+function readXhrError(xhr: XMLHttpRequest) {
+  const contentType = xhr.getResponseHeader("Content-Type") ?? ""
+  if (contentType.includes("application/json")) {
+    try {
+      const data = JSON.parse(xhr.responseText) as Record<string, unknown>
+      const detail = data.detail ?? data.error ?? data.message
+      if (typeof detail === "string") return detail
+    } catch {
+      return `Error HTTP ${xhr.status}`
+    }
+  }
+  const body = xhr.responseText.trim()
+  if (!body) return `Error HTTP ${xhr.status}`
+  if (body.startsWith("<!doctype html") || body.startsWith("<html")) return `Error HTTP ${xhr.status}`
+  return body.length > 300 ? `${body.slice(0, 300)}...` : body
 }
 
 function isTokenError(message: string) {

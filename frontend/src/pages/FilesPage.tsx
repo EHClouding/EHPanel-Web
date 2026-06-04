@@ -55,6 +55,18 @@ type FileOperation =
 type SortField = "name" | "kind" | "rawSize" | "modifiedAt"
 type SortDirection = "asc" | "desc"
 type ArchiveFormat = "zip" | "tar.gz" | "tar"
+type UploadFileItem = {
+  file: File
+  relativePath: string
+}
+type UploadSession = {
+  currentFile: string
+  currentIndex: number
+  fileProgress: number
+  loaded: number
+  total: number
+  totalFiles: number
+}
 
 export function FilesPage() {
   const [accounts, setAccounts] = useState<HostingAccount[]>([])
@@ -73,6 +85,8 @@ export function FilesPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [showOpenLiteSpeedApply, setShowOpenLiteSpeedApply] = useState(false)
   const [isApplyingOpenLiteSpeed, setIsApplyingOpenLiteSpeed] = useState(false)
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false)
+  const [uploadSession, setUploadSession] = useState<UploadSession | null>(null)
   const [message, setMessage] = useState("")
   const [error, setError] = useState("")
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -166,19 +180,43 @@ export function FilesPage() {
   }
 
   const handleUploadFiles = async (fileList: FileList | null, preserveRelativePath = false) => {
-    const items = Array.from(fileList ?? [])
+    const items = Array.from(fileList ?? []).map((file) => ({
+      file,
+      relativePath: preserveRelativePath ? String(file.webkitRelativePath || file.name) : file.name,
+    }))
+    await handleUploadItems(items)
+  }
+
+  const handleUploadItems = async (items: UploadFileItem[]) => {
     if (!items.length) return
     const hasHtaccess = items.some((item) => {
-      const relativePath = preserveRelativePath ? String(item.webkitRelativePath || item.name) : item.name
-      return isHtaccessPath(relativePath)
+      return isHtaccessPath(item.relativePath)
     })
     setError("")
     setMessage("")
+    setUploadSession({
+      currentFile: items[0]?.relativePath ?? "",
+      currentIndex: 0,
+      fileProgress: 0,
+      loaded: 0,
+      total: items.reduce((sum, item) => sum + item.file.size, 0),
+      totalFiles: items.length,
+    })
 
     try {
-      for (const item of items) {
-        const relativePath = preserveRelativePath ? String(item.webkitRelativePath || item.name) : item.name
-        await hostingApi.fileUpload(accountId, joinPath(currentPath, relativePath), item)
+      let uploadedBeforeCurrent = 0
+      for (const [index, item] of items.entries()) {
+        setUploadSession((current) => current ? { ...current, currentFile: item.relativePath, currentIndex: index, fileProgress: 0 } : current)
+        const response = await hostingApi.fileUploadWithProgress(accountId, joinPath(currentPath, item.relativePath), item.file, true, (progress) => {
+          setUploadSession((current) => current ? {
+            ...current,
+            fileProgress: progress.percent,
+            loaded: uploadedBeforeCurrent + progress.loaded,
+          } : current)
+        })
+        await waitFileResult(response.job, response)
+        uploadedBeforeCurrent += item.file.size
+        setUploadSession((current) => current ? { ...current, fileProgress: 100, loaded: uploadedBeforeCurrent } : current)
       }
       await loadFiles(accountId, currentPath)
       if (hasHtaccess && activeAccount?.web_engine === "openlitespeed") {
@@ -189,6 +227,8 @@ export function FilesPage() {
       }
     } catch (uploadError) {
       setError(readMessage(uploadError))
+    } finally {
+      setUploadSession(null)
     }
   }
 
@@ -336,6 +376,7 @@ export function FilesPage() {
 
   return (
     <div className="space-y-4">
+      {uploadSession ? <UploadProgressModal session={uploadSession} /> : null}
       <section className="grid gap-3 md:grid-cols-4">
         <FileSummary label="Ruta actual" value={currentPath} detail={activeAccount?.primary_domain ?? "Cuenta hosting"} />
         <FileSummary label="Elementos" value={isLoading ? "..." : files.length.toString()} detail="Archivos y carpetas" />
@@ -359,7 +400,35 @@ export function FilesPage() {
       ) : null}
       {error ? <Notice tone="error" text={error} /> : null}
 
-      <section className="eh-card overflow-hidden">
+      <section
+        className={cn("eh-card relative overflow-hidden", isDraggingFiles && "ring-2 ring-blue-400")}
+        onDragEnter={(event) => {
+          event.preventDefault()
+          setIsDraggingFiles(true)
+        }}
+        onDragOver={(event) => {
+          event.preventDefault()
+          event.dataTransfer.dropEffect = "copy"
+          setIsDraggingFiles(true)
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingFiles(false)
+        }}
+        onDrop={(event) => {
+          event.preventDefault()
+          setIsDraggingFiles(false)
+          void collectDroppedUploadItems(event.dataTransfer).then((items) => handleUploadItems(items))
+        }}
+      >
+        {isDraggingFiles ? (
+          <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center bg-blue-950/20 backdrop-blur-[1px]">
+            <div className="rounded-lg border border-blue-200 bg-white px-5 py-4 text-center shadow-xl">
+              <Upload className="mx-auto h-6 w-6 text-blue-600" />
+              <div className="mt-2 text-sm font-bold text-slate-900">Suelta los archivos para cargarlos</div>
+              <div className="mt-1 text-xs text-slate-500">Destino: {currentPath}</div>
+            </div>
+          </div>
+        ) : null}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
           <div>
             <h2 className="text-base font-bold">Archivos</h2>
@@ -680,6 +749,38 @@ function FileSummary({ label, value, detail }: { label: string; value: string; d
       <div className="text-xs font-bold uppercase tracking-wide text-slate-500">{label}</div>
       <div className="mt-1 truncate text-lg font-bold text-slate-900">{value}</div>
       <div className="text-xs text-slate-500">{detail}</div>
+    </div>
+  )
+}
+
+function UploadProgressModal({ session }: { session: UploadSession }) {
+  const totalPercent = session.total > 0 ? Math.max(0, Math.min(100, Math.round((session.loaded / session.total) * 100))) : session.fileProgress
+
+  return (
+    <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/45 px-4">
+      <div className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-5 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-md bg-blue-50 text-blue-700">
+            <Upload className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-bold text-slate-900">Subiendo archivos</div>
+            <div className="mt-1 truncate text-xs font-semibold text-slate-500">{session.currentFile}</div>
+          </div>
+          <div className="text-sm font-bold text-blue-700">{totalPercent}%</div>
+        </div>
+        <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
+          <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${totalPercent}%` }} />
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-semibold text-slate-500">
+          <span>{session.currentIndex + 1} de {session.totalFiles}</span>
+          <span className="text-right">{formatBytes(session.loaded)} / {formatBytes(session.total)}</span>
+        </div>
+        <div className="mt-3 h-1 overflow-hidden rounded-full bg-slate-100">
+          <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${session.fileProgress}%` }} />
+        </div>
+        <div className="mt-2 text-xs font-semibold text-slate-500">Transferencia del archivo actual: {session.fileProgress}%</div>
+      </div>
     </div>
   )
 }
@@ -1149,6 +1250,63 @@ function joinPath(base: string, name: string) {
 
 function isHtaccessPath(path: string) {
   return path.split(/[\\/]/).pop()?.toLowerCase() === ".htaccess"
+}
+
+async function collectDroppedUploadItems(dataTransfer: DataTransfer): Promise<UploadFileItem[]> {
+  const rawEntries: Array<WebkitFileEntry | WebkitDirectoryEntry | null> = Array.from(dataTransfer.items)
+    .map((item) => {
+      const maybeEntry = item as DataTransferItem & { webkitGetAsEntry?: () => WebkitFileEntry | WebkitDirectoryEntry | null }
+      return (maybeEntry.webkitGetAsEntry?.() ?? null) as WebkitFileEntry | WebkitDirectoryEntry | null
+    })
+  const entries = rawEntries.filter((entry): entry is WebkitFileEntry | WebkitDirectoryEntry => Boolean(entry))
+
+  if (!entries.length) {
+    return Array.from(dataTransfer.files).map((file) => ({ file, relativePath: file.name }))
+  }
+
+  const nested = await Promise.all(entries.map((entry) => readDroppedEntry(entry, "")))
+  return nested.flat()
+}
+
+async function readDroppedEntry(entry: WebkitFileEntry | WebkitDirectoryEntry, parentPath: string): Promise<UploadFileItem[]> {
+  const relativePath = parentPath ? `${parentPath}/${entry.name}` : entry.name
+  if (entry.isFile) {
+    const file = await new Promise<File>((resolve, reject) => {
+      ;(entry as WebkitFileEntry).file(resolve, reject)
+    })
+    return [{ file, relativePath }]
+  }
+
+  const reader = (entry as WebkitDirectoryEntry).createReader()
+  const children: Array<WebkitFileEntry | WebkitDirectoryEntry> = []
+  while (true) {
+    const batch = await new Promise<Array<WebkitFileEntry | WebkitDirectoryEntry>>((resolve, reject) => {
+      reader.readEntries(resolve, reject)
+    })
+    if (!batch.length) break
+    children.push(...batch)
+  }
+  const nested = await Promise.all(children.map((child) => readDroppedEntry(child, relativePath)))
+  return nested.flat()
+}
+
+type WebkitFileEntry = {
+  file: (success: (file: File) => void, failure?: (error: DOMException) => void) => void
+  isFile: true
+  isDirectory: false
+  name: string
+}
+
+type WebkitDirectoryEntry = {
+  createReader: () => {
+    readEntries: (
+      success: (entries: Array<WebkitFileEntry | WebkitDirectoryEntry>) => void,
+      failure?: (error: DOMException) => void,
+    ) => void
+  }
+  isFile: false
+  isDirectory: true
+  name: string
 }
 
 function formatBytes(value: number) {
