@@ -71,6 +71,11 @@ else
   log "WARNING: No .git directory found; continuing with current files"
 fi
 
+if [[ -f "scripts/ehpanel-local-provision.py" ]]; then
+  log "Installing local provisioning helper"
+  install -o root -g root -m 0750 "scripts/ehpanel-local-provision.py" "/usr/local/sbin/ehpanel-local-provision"
+fi
+
 log "Installing Python dependencies"
 "${VENV_DIR}/bin/pip" install -r requirements.txt --quiet
 

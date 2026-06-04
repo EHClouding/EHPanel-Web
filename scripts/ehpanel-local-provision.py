@@ -50,6 +50,14 @@ def run(args, input_text=None, check=True, cwd=None, env=None):
     return {"command": args, "returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
 
 
+def file_tail(path, max_chars=4000):
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-max_chars:]
+
+
 def validate_username(username):
     if not SAFE_USER.match(username or ""):
         raise ValueError(f"Usuario invalido: {username}")
@@ -892,7 +900,21 @@ def issue_ssl(payload, settings):
         args.append("--staging")
     if payload.get("force_renewal"):
         args.append("--force-renewal")
-    result = run(args, check=True)
+    result = run(args, check=False)
+    if result["returncode"] != 0:
+        letsencrypt_log = file_tail("/var/log/letsencrypt/letsencrypt.log")
+        return fail(
+            "CERTBOT_HTTP01_FAILED",
+            "Certbot no pudo completar el challenge HTTP-01.",
+            domain=domain,
+            webroot=webroot,
+            command=args,
+            returncode=result["returncode"],
+            stdout_tail=(result.get("stdout") or "")[-2000:],
+            stderr_tail=(result.get("stderr") or "")[-2000:],
+            letsencrypt_log_tail=letsencrypt_log,
+            hint="Si el log muestra redirect/404/403/526, revisa Cloudflare, DNS y acceso publico a /.well-known/acme-challenge/ antes de reintentar.",
+        )
     write_nginx_proxy(domain, username, settings, ssl=True, document_root=payload.get("document_root") or "public_html")
     write_mail_autoconfig_nginx_proxy(domain, username, settings, ssl=True)
     write_webmail_nginx_proxy(domain, username, settings, ssl=True)
