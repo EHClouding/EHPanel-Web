@@ -369,7 +369,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-ssl-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-ssl-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {acme_root}/;
+        alias {acme_root}/.well-known/acme-challenge/;
         default_type text/plain;
     }}
 {nginx_mail_autoconfig_locations(settings, "https")}
@@ -389,7 +389,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {acme_root}/;
+        alias {acme_root}/.well-known/acme-challenge/;
         default_type text/plain;
     }}
 {nginx_mail_autoconfig_locations(settings)}
@@ -455,7 +455,7 @@ def write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root="
     access_log /var/log/nginx/ehpanel-{log_name}-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {acme_root}/;
+        alias {acme_root}/.well-known/acme-challenge/;
         default_type text/plain;
     }}
 {nginx_mail_autoconfig_locations(settings)}
@@ -477,7 +477,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-ssl-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-ssl-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {acme_root}/;
+        alias {acme_root}/.well-known/acme-challenge/;
         default_type text/plain;
     }}
 {nginx_mail_autoconfig_locations(settings, "https")}
