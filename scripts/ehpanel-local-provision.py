@@ -2038,9 +2038,12 @@ def file_upload(payload, settings):
     _home, target, rel = safe_account_path(payload, settings)
     target.parent.mkdir(parents=True, exist_ok=True)
     ensure_target_available(target, bool(payload.get("overwrite", True)))
-    shutil.copy2(source, target)
+    try:
+        shutil.move(str(source), str(target))
+    except OSError:
+        shutil.copy2(source, target)
+        source.unlink(missing_ok=True)
     chown_account_path(username, target)
-    source.unlink(missing_ok=True)
     return ok(path=rel, absolute_path=str(target), size=target.stat().st_size, mode=mode_string(target))
 
 

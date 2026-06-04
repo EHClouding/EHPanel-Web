@@ -2050,7 +2050,8 @@ class HostingAccountViewSet(viewsets.ModelViewSet):
         return Response(response)
 
     def _file_job_response(self, account, job_type, payload):
-        job = run_account_file_job(account, job_type, payload)
+        timeout = 300 if job_type == AgentJob.Type.FILE_UPLOAD else 10
+        job = run_account_file_job(account, job_type, payload, timeout=timeout)
         if job.status == AgentJob.Status.SUCCESS:
             return Response({"status": "success", "job": str(job.id), **(job.result or {})})
         if job.status == AgentJob.Status.FAILED:
