@@ -160,9 +160,11 @@ export function DomainsPage() {
     setMessage("")
 
     try {
-      const updated = await hostingApi.issueDomainSsl(item.id)
-      setDomains((current) => current.map((domain) => (domain.id === item.id ? mapDomain(updated) : domain)))
-      setMessage(`Emision SSL enviada para ${item.domain}.`)
+      const response = await hostingApi.issueDomainSsl(item.id)
+      setDomains((current) => current.map((domain) => (domain.id === item.id ? mapDomain(response.domain) : domain)))
+      const job = await waitSslJob(response.job)
+      await loadDomains()
+      setMessage(job.status === "success" ? `SSL emitido y confirmado para ${item.domain}.` : `SSL no confirmado para ${item.domain}: ${job.error}`)
       setActionDomain(null)
     } catch (sslError) {
       setError(readMessage(sslError))
@@ -895,6 +897,16 @@ async function waitDirectoryResult(
   }
 
   return initial
+}
+
+async function waitSslJob(jobId: string) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+    const job = await hostingApi.job(jobId)
+    if (job.status === "success") return { status: "success", error: "" }
+    if (job.status === "failed") return { status: "failed", error: job.error_detail || job.error_code || "No se pudo emitir el certificado." }
+  }
+  return { status: "pending", error: "la emision sigue en proceso; revisa el estado en unos segundos." }
 }
 
 async function ensureAccountDirectory(accountId: string, path: string) {

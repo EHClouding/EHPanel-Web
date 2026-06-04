@@ -8838,14 +8838,14 @@ function AdminGlobalSslPage() {
     setIsSaving(true)
     setMessage("")
     try {
-      const updated = await hostingApi.issueDomainSsl(domain.id, {
+      const response = await hostingApi.issueDomainSsl(domain.id, {
         email: "",
         force_renewal: forceRenewal,
         include_www: domain.domain_type !== "subdomain",
         staging: false,
       })
-      updateDomain(updated)
-      setMessage(`Emision SSL enviada al agente para ${updated.domain}.`)
+      updateDomain(response.domain)
+      setMessage(`Emision SSL enviada al agente para ${response.domain.domain}.`)
       setShowCreateSsl(false)
     } catch (reason) {
       setMessage(readAdminError(reason, "No se pudo emitir el certificado SSL."))
@@ -8866,13 +8866,13 @@ function AdminGlobalSslPage() {
     let failed = 0
     for (const row of pendingRows) {
       try {
-        const updated = await hostingApi.issueDomainSsl(row.domain.id, {
+        const response = await hostingApi.issueDomainSsl(row.domain.id, {
           email: "",
           force_renewal: row.status === "Error",
           include_www: row.domain.domain_type !== "subdomain",
           staging: false,
         })
-        updateDomain(updated)
+        updateDomain(response.domain)
         queued += 1
       } catch {
         failed += 1
@@ -9199,15 +9199,15 @@ function AdminClientSslPage() {
     setIsSaving(true)
     setMessage("")
     try {
-      const updated = await hostingApi.issueDomainSsl(domain.id, {
+      const response = await hostingApi.issueDomainSsl(domain.id, {
         email: "",
         force_renewal: forceRenewal,
         include_www: domain.domain_type !== "subdomain",
         staging: false,
       })
-      updateDomain(updated)
+      updateDomain(response.domain)
       setIssueRow(null)
-      setMessage(`Emision SSL enviada al agente para ${updated.domain}.`)
+      setMessage(`Emision SSL enviada al agente para ${response.domain.domain}.`)
     } catch (reason) {
       setMessage(readAdminError(reason, "No se pudo emitir o renovar el SSL del cliente."))
     } finally {

@@ -721,6 +721,9 @@ def issue_ssl(payload, settings):
     domain = validate_domain(payload["domain"])
     username = payload["username"]
     webroot = str(account_document_root(username, settings, payload.get("document_root") or "public_html"))
+    Path(webroot).mkdir(parents=True, exist_ok=True)
+    Path(webroot, ".well-known", "acme-challenge").mkdir(parents=True, exist_ok=True)
+    run(["chown", "-R", f"{username}:{username}", webroot], check=False)
     if not dns_has_public_answer(domain):
         return fail("SSL_DNS_NOT_FOUND", f"El dominio {domain} no tiene DNS publico A/AAAA para emitir SSL.")
     requested_aliases = []
@@ -2651,6 +2654,43 @@ def collect_monitor_logs(domain):
     return {"web": web[-30:], "mail": mail[-20:], "system": system[-20:]}
 
 
+def parse_waf_event_line(line, source="nginx"):
+    access = parse_nginx_access_line(line)
+    if access.get("code") in [403, 406, 429] or "modsecurity" in line.lower() or "access denied" in line.lower():
+        return {
+            "time": access.get("time") or "",
+            "source": source,
+            "ip": str(access.get("detail") or "").split(" - ")[0] if access.get("detail") else "",
+            "rule": "HTTP " + str(access.get("code") or "WAF"),
+            "path": access.get("path") or "",
+            "action": "blocked" if access.get("code") in [403, 406, 429] else "logged",
+            "severity": "high" if access.get("code") == 403 else "medium",
+            "detail": line[:500],
+        }
+    return None
+
+
+def collect_waf_events(payload, settings):
+    domain = validate_domain(payload["domain"])
+    limit = max(1, min(int(payload.get("limit") or 50), 200))
+    safe_domain = safe_vhost_name(domain)
+    events = []
+    log_paths = [
+        (f"/var/log/nginx/ehpanel-{safe_domain}-ssl-access.log", "nginx"),
+        (f"/var/log/nginx/ehpanel-{safe_domain}-access.log", "nginx"),
+        (f"/var/log/nginx/ehpanel-{safe_domain}-ssl-error.log", "nginx-error"),
+        (f"/var/log/nginx/ehpanel-{safe_domain}-error.log", "nginx-error"),
+        ("/var/log/nginx/modsec_audit.log", "modsecurity"),
+        ("/var/log/modsec_audit.log", "modsecurity"),
+    ]
+    for path, source in log_paths:
+        for line in tail_file(path, limit):
+            event = parse_waf_event_line(line, source)
+            if event:
+                events.append(event)
+    return ok(domain=domain, events=events[-limit:], count=len(events[-limit:]))
+
+
 def collect_account_monitoring(payload):
     domain = validate_domain(payload["domain"])
     http = http_probe(f"https://{domain}")
@@ -2757,6 +2797,8 @@ def main():
             return run_web_performance_audit(payload, settings)
         if job_type == "collect_account_monitoring":
             return collect_account_monitoring(payload)
+        if job_type == "collect_waf_events":
+            return collect_waf_events(payload, settings)
         if job_type == "file_list":
             return file_list(payload, settings)
         if job_type == "file_read":

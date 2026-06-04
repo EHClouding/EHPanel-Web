@@ -2395,7 +2395,7 @@ export const hostingApi = {
     id: number,
     payload: { email?: string; force_renewal?: boolean; include_www?: boolean; staging?: boolean } = {},
   ) =>
-    apiFetch<HostingDomain>(`/hosting/domains/${id}/issue-ssl/`, {
+    apiFetch<{ status: string; job: string; domain: HostingDomain }>(`/hosting/domains/${id}/issue-ssl/`, {
       body: JSON.stringify({
         email: payload.email ?? "",
         force_renewal: payload.force_renewal ?? false,

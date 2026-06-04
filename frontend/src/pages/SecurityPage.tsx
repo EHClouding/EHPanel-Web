@@ -392,13 +392,15 @@ export function SecurityPage() {
 
     try {
       const target = domains.find((domain) => domain.id === domainId)
-      const updated = await hostingApi.issueDomainSsl(domainId, {
+      const response = await hostingApi.issueDomainSsl(domainId, {
         force_renewal: false,
         include_www: target?.domain_type !== "subdomain",
         staging: false,
       })
-      setDomains((current) => current.map((domain) => (domain.id === updated.id ? updated : domain)))
-      setMessage(`Emision SSL enviada al agente para ${updated.domain}.`)
+      setDomains((current) => current.map((domain) => (domain.id === response.domain.id ? response.domain : domain)))
+      const job = await waitSslJob(response.job)
+      await loadCertificates()
+      setMessage(job.status === "success" ? `SSL emitido y confirmado para ${response.domain.domain}.` : `SSL no confirmado para ${response.domain.domain}: ${job.error}`)
       setSelectedCertificateDomainId(null)
       setIsCertificateOpen(false)
     } catch (issueError) {
@@ -1636,6 +1638,16 @@ function mapSslCertificate(domain: HostingDomain): SslCertificate {
 
 function certificateHasWebmailSsl(certificate: SslCertificate) {
   return (certificate.raw.ssl_domains || []).includes(`webmail.${certificate.domain}`)
+}
+
+async function waitSslJob(jobId: string) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+    const job = await hostingApi.job(jobId)
+    if (job.status === "success") return { status: "success", error: "" }
+    if (job.status === "failed") return { status: "failed", error: job.error_detail || job.error_code || "No se pudo emitir el certificado." }
+  }
+  return { status: "pending", error: "la emision sigue en proceso; revisa el estado en unos segundos." }
 }
 
 function mapCertificateStatus(domain: HostingDomain): CertificateStatus {

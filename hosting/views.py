@@ -3088,14 +3088,21 @@ class HostingDomainViewSet(viewsets.ModelViewSet):
         hosting_domain = self.get_object()
         serializer = IssueDomainSSLSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        issue_domain_ssl(
+        job = issue_domain_ssl(
             hosting_domain,
             serializer.validated_data.get("email", ""),
             serializer.validated_data["include_www"],
             serializer.validated_data["staging"],
             serializer.validated_data["force_renewal"],
         )
-        return Response(HostingDomainSerializer(hosting_domain, context=self.get_serializer_context()).data, status=status.HTTP_202_ACCEPTED)
+        return Response(
+            {
+                "status": "queued",
+                "job": str(job.id),
+                "domain": HostingDomainSerializer(hosting_domain, context=self.get_serializer_context()).data,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     @action(detail=True, methods=["post"], url_path="activate-webmail")
     def activate_webmail(self, request, pk=None):

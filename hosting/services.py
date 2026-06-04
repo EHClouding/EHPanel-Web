@@ -2215,12 +2215,13 @@ def issue_domain_ssl(hosting_domain, email="", include_www=True, staging=False, 
     hosting_domain.save(update_fields=["ssl_status", "ssl_error_code", "ssl_error_detail", "updated_at"])
     include_www = bool(include_www) and hosting_domain.domain_type != HostingDomain.DomainType.SUBDOMAIN
     aliases = [f"www.{hosting_domain.domain}"] if include_www else []
-    webmail_alias = f"webmail.{hosting_domain.domain}"
-    if not hosting_domain.domain.startswith("webmail.") and webmail_alias not in aliases:
-        aliases.append(webmail_alias)
-    for mail_config_alias in [f"autoconfig.{hosting_domain.domain}", f"autodiscover.{hosting_domain.domain}"]:
-        if mail_config_alias not in aliases:
-            aliases.append(mail_config_alias)
+    if hosting_domain.domain_type != HostingDomain.DomainType.SUBDOMAIN:
+        webmail_alias = f"webmail.{hosting_domain.domain}"
+        if not hosting_domain.domain.startswith("webmail.") and webmail_alias not in aliases:
+            aliases.append(webmail_alias)
+        for mail_config_alias in [f"autoconfig.{hosting_domain.domain}", f"autodiscover.{hosting_domain.domain}"]:
+            if mail_config_alias not in aliases:
+                aliases.append(mail_config_alias)
     document_root = (hosting_domain.document_root or "public_html").strip().strip("/")
     return queue_account_job(
         hosting_domain.account,
