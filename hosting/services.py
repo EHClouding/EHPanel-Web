@@ -2642,6 +2642,39 @@ def test_mail_delivery(mailbox, recipient, subject=""):
     )
 
 
+def import_mailbox(account, data):
+    destination_mode = data.get("destination_mode") or "existing"
+    if destination_mode == "new":
+        mailbox = create_mailbox(
+            account,
+            data["destination_email"],
+            data.get("destination_password") or "",
+            int(data.get("quota_mb") or 1024),
+            {"description": f"Importado desde {data.get('source_email') or 'IMAP'}"},
+        )
+    else:
+        mailbox = data["destination_mailbox"]
+
+    mailbox.usage_status = "pending"
+    update_fields = ["usage_status", "updated_at"]
+    if destination_mode == "new":
+        mailbox.status = HostingMailbox.Status.PENDING
+        update_fields.append("status")
+    mailbox.save(update_fields=update_fields)
+    payload = {
+        "email": mailbox.email,
+        "source_email": data["source_email"],
+        "source_password": data["source_password"],
+        "source_host": data.get("source_host") or "",
+        "source_port": int(data.get("source_port") or 0),
+        "source_encryption": data.get("source_encryption") or "auto",
+        "source_timeout": int(data.get("source_timeout") or 30),
+        "source_folder_separator": data.get("source_folder_separator") or "",
+    }
+    job = queue_account_job(account, AgentJob.Type.IMPORT_MAILBOX, payload)
+    return mailbox, job
+
+
 def app_safe_slug(value, fallback="app"):
     slug = re.sub(r"[^a-z0-9-]+", "-", str(value or "").strip().lower()).strip("-")
     slug = re.sub(r"-+", "-", slug)
@@ -3871,12 +3904,13 @@ def sync_job_side_effects(job):
             mailbox.save(update_fields=["status", "updated_at"])
         elif job.job_type == AgentJob.Type.DELETE_MAILBOX:
             mailbox.delete()
-        elif job.job_type == AgentJob.Type.COLLECT_MAILBOX_USAGE:
+        elif job.job_type in [AgentJob.Type.COLLECT_MAILBOX_USAGE, AgentJob.Type.IMPORT_MAILBOX]:
             used_mb = int((job.result or {}).get("used_mb") or 0)
             mailbox.used_mb = max(0, used_mb)
             mailbox.usage_status = "ok"
+            mailbox.status = HostingMailbox.Status.ACTIVE
             mailbox.last_usage_at = timezone.now()
-            mailbox.save(update_fields=["used_mb", "usage_status", "last_usage_at", "updated_at"])
+            mailbox.save(update_fields=["used_mb", "usage_status", "status", "last_usage_at", "updated_at"])
         elif job.job_type == AgentJob.Type.TEST_MAIL_DELIVERY:
             mailbox.last_test_status = "success"
             mailbox.last_test_result = job.result or {}
@@ -3890,11 +3924,16 @@ def sync_job_side_effects(job):
         AgentJob.Type.DELETE_MAILBOX,
         AgentJob.Type.SET_MAILBOX_QUOTA,
         AgentJob.Type.COLLECT_MAILBOX_USAGE,
+        AgentJob.Type.IMPORT_MAILBOX,
         AgentJob.Type.TEST_MAIL_DELIVERY,
     ]:
         if job.job_type == AgentJob.Type.COLLECT_MAILBOX_USAGE:
             mailbox.usage_status = "failed"
             mailbox.save(update_fields=["usage_status", "updated_at"])
+        elif job.job_type == AgentJob.Type.IMPORT_MAILBOX:
+            mailbox.usage_status = "failed"
+            mailbox.status = HostingMailbox.Status.ACTIVE
+            mailbox.save(update_fields=["usage_status", "status", "updated_at"])
         elif job.job_type == AgentJob.Type.TEST_MAIL_DELIVERY:
             mailbox.last_test_status = "failed"
             mailbox.last_test_result = {

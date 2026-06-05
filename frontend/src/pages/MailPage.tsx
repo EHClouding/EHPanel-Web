@@ -48,6 +48,21 @@ const emptyForm = {
 }
 
 type MailForm = typeof emptyForm
+type ImportMailForm = {
+  sourceEmail: string
+  sourcePassword: string
+  destinationMode: "existing" | "new"
+  destinationMailbox: string
+  destinationEmail: string
+  destinationPassword: string
+  destinationConfirmPassword: string
+  quotaGb: string
+  sourceHost: string
+  sourcePort: string
+  sourceEncryption: "auto" | "ssl" | "plain"
+  sourceTimeout: string
+  sourceFolderSeparator: string
+}
 
 export function MailPage() {
   const [accounts, setAccounts] = useState<HostingAccount[]>([])
@@ -56,12 +71,29 @@ export function MailPage() {
   const [typeFilter, setTypeFilter] = useState<"Todos" | MailType>("Todos")
   const [statusFilter, setStatusFilter] = useState<"Todos" | MailStatus>("Todos")
   const [isCreateOpen, setIsCreateOpen] = useState(false)
+  const [isImportOpen, setIsImportOpen] = useState(false)
+  const [isImporting, setIsImporting] = useState(false)
   const [editingAccount, setEditingAccount] = useState<HostingMailbox | null>(null)
   const [configAccount, setConfigAccount] = useState<HostingMailbox | null>(null)
   const [antispamAccount, setAntispamAccount] = useState<HostingMailbox | null>(null)
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState("")
   const [form, setForm] = useState<MailForm>(emptyForm)
+  const [importForm, setImportForm] = useState<ImportMailForm>({
+    destinationEmail: "",
+    destinationMailbox: "",
+    destinationMode: "existing",
+    destinationConfirmPassword: "",
+    destinationPassword: "",
+    quotaGb: "5",
+    sourceEmail: "",
+    sourceEncryption: "auto",
+    sourceFolderSeparator: "",
+    sourceHost: "",
+    sourcePassword: "",
+    sourcePort: "",
+    sourceTimeout: "30",
+  })
 
   const selectedAccount = accounts[0]
 
@@ -134,6 +166,67 @@ export function MailPage() {
       address: selectedAccount ? `@${selectedAccount.primary_domain}` : "",
     })
     setIsCreateOpen(true)
+  }
+
+  const openImport = () => {
+    setImportForm({
+      destinationEmail: "",
+      destinationMailbox: mailboxes[0]?.id.toString() ?? "",
+      destinationMode: mailboxes.length ? "existing" : "new",
+      destinationConfirmPassword: "",
+      destinationPassword: "",
+      quotaGb: "5",
+      sourceEmail: "",
+      sourceEncryption: "auto",
+      sourceFolderSeparator: "",
+      sourceHost: "",
+      sourcePassword: "",
+      sourcePort: "",
+      sourceTimeout: "30",
+    })
+    setIsImportOpen(true)
+  }
+
+  const importMailbox = async () => {
+    if (!selectedAccount || !importForm.sourceEmail.trim() || !importForm.sourcePassword) return
+    const destinationEmail =
+      importForm.destinationEmail.includes("@") || !selectedAccount.primary_domain
+        ? importForm.destinationEmail.trim().toLowerCase()
+        : `${importForm.destinationEmail.trim().toLowerCase()}@${selectedAccount.primary_domain}`
+    if (importForm.destinationMode === "new" && importForm.destinationPassword !== importForm.destinationConfirmPassword) {
+      setMessage("La confirmacion de contrasena no coincide.")
+      return
+    }
+    setIsImporting(true)
+    setMessage("")
+    try {
+      const result = await hostingApi.importMailbox({
+        account: selectedAccount.id,
+        destination_email: importForm.destinationMode === "new" ? destinationEmail : undefined,
+        destination_mailbox: importForm.destinationMode === "existing" ? Number(importForm.destinationMailbox) : null,
+        destination_mode: importForm.destinationMode,
+        destination_password: importForm.destinationMode === "new" ? importForm.destinationPassword : undefined,
+        quota_mb: Math.max(1, Number(importForm.quotaGb) || 1) * 1024,
+        source_email: importForm.sourceEmail.trim().toLowerCase(),
+        source_encryption: importForm.sourceEncryption,
+        source_folder_separator: importForm.sourceFolderSeparator,
+        source_host: importForm.sourceHost.trim(),
+        source_password: importForm.sourcePassword,
+        source_port: importForm.sourcePort ? Number(importForm.sourcePort) : null,
+        source_timeout: Number(importForm.sourceTimeout) || 30,
+      })
+      setMailboxes((current) => {
+        const exists = current.some((item) => item.id === result.mailbox.id)
+        return exists ? current.map((item) => (item.id === result.mailbox.id ? result.mailbox : item)) : [...current, result.mailbox]
+      })
+      setIsImportOpen(false)
+      setMessage(`Importacion iniciada para ${result.mailbox.email}. Job ${result.job}.`)
+      await loadData()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "No se pudo iniciar la importacion.")
+    } finally {
+      setIsImporting(false)
+    }
   }
 
   const openEdit = (account: HostingMailbox) => {
@@ -223,10 +316,16 @@ export function MailPage() {
             <h2 className="text-base font-bold">Correos</h2>
             <p className="text-xs text-slate-500">Buzones, reenvios y proteccion de {selectedAccount?.primary_domain || "la cuenta"}.</p>
           </div>
-          <Button disabled={!selectedAccount} onClick={openCreate} size="sm">
-            <Plus className="h-4 w-4" />
-            Anadir correo
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={!selectedAccount} onClick={openImport} size="sm" variant="outline">
+              <Download className="h-4 w-4" />
+              Importar
+            </Button>
+            <Button disabled={!selectedAccount} onClick={openCreate} size="sm">
+              <Plus className="h-4 w-4" />
+              Anadir correo
+            </Button>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3">
@@ -317,6 +416,18 @@ export function MailPage() {
             setEditingAccount(null)
           }}
           onSave={saveAccount}
+        />
+      )}
+
+      {isImportOpen && (
+        <ImportMailModal
+          domain={selectedAccount?.primary_domain ?? ""}
+          form={importForm}
+          isSaving={isImporting}
+          mailboxes={mailboxes}
+          onChange={(patch) => setImportForm((current) => ({ ...current, ...patch }))}
+          onClose={() => setIsImportOpen(false)}
+          onSave={() => void importMailbox()}
         />
       )}
 
@@ -478,6 +589,154 @@ function CreateMailModal({
           <Button onClick={onClose} size="sm" type="button" variant="outline">Cancelar</Button>
           <Button disabled={!form.address.trim() || (mode === "create" && !form.password.trim())} onClick={onSave} size="sm" type="button">
             {mode === "edit" ? "Guardar cambios" : "Anadir correo"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ImportMailModal({
+  domain,
+  form,
+  isSaving,
+  mailboxes,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  domain: string
+  form: ImportMailForm
+  isSaving: boolean
+  mailboxes: HostingMailbox[]
+  onChange: (patch: Partial<ImportMailForm>) => void
+  onClose: () => void
+  onSave: () => void
+}) {
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const destinationIsNew = form.destinationMode === "new"
+  const destinationEmail = form.destinationEmail.trim()
+  const hasDestination = destinationIsNew ? Boolean(destinationEmail) : Boolean(form.destinationMailbox)
+  const passwordMatches = !destinationIsNew || (form.destinationPassword.length >= 8 && form.destinationPassword === form.destinationConfirmPassword)
+  const canSave = Boolean(form.sourceEmail.trim() && form.sourcePassword && hasDestination && passwordMatches && !isSaving)
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4">
+      <div className="max-h-[92vh] w-full max-w-3xl overflow-hidden rounded-lg bg-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+          <div>
+            <div className="eh-kicker">Correos</div>
+            <h3 className="mt-1 text-lg font-bold">Importar buzon de correo</h3>
+          </div>
+          <button className="grid h-8 w-8 place-items-center rounded-md text-slate-500 hover:bg-slate-100" onClick={onClose} type="button">
+            <XCircle className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="max-h-[calc(92vh-132px)] overflow-y-auto px-5 py-4">
+          <div className="grid gap-4 md:grid-cols-2">
+            <FormInput label="Email de origen" onChange={(value) => onChange({ sourceEmail: value })} placeholder="usuario@dominio.com" value={form.sourceEmail} />
+            <FormInput label="Contrasena de origen" onChange={(value) => onChange({ sourcePassword: value })} placeholder="Contrasena IMAP" type="password" value={form.sourcePassword} />
+          </div>
+
+          <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <div className="mb-3 text-xs font-bold text-slate-600">Importar a</div>
+            <div className="space-y-2 text-sm font-semibold text-slate-700">
+              <label className="flex items-center gap-2">
+                <input
+                  checked={form.destinationMode === "existing"}
+                  className="h-4 w-4 border-slate-300"
+                  disabled={!mailboxes.length}
+                  onChange={() => onChange({ destinationMode: "existing", destinationMailbox: mailboxes[0]?.id.toString() ?? "" })}
+                  type="radio"
+                />
+                Buzon de correo existente
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  checked={form.destinationMode === "new"}
+                  className="h-4 w-4 border-slate-300"
+                  onChange={() => onChange({ destinationMode: "new" })}
+                  type="radio"
+                />
+                Crear un buzon de correo nuevo
+              </label>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            {form.destinationMode === "existing" ? (
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-bold text-slate-600">Email de destino</span>
+                <select
+                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  onChange={(event) => onChange({ destinationMailbox: event.target.value })}
+                  value={form.destinationMailbox}
+                >
+                  {mailboxes.map((mailbox) => (
+                    <option key={mailbox.id} value={mailbox.id}>{mailbox.email}</option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2">
+                <FormInput
+                  label="Email de destino"
+                  onChange={(value) => onChange({ destinationEmail: value })}
+                  placeholder="nuevo"
+                  suffix={domain && !form.destinationEmail.includes("@") ? `@${domain}` : undefined}
+                  value={form.destinationEmail}
+                />
+                <FormInput label="Tamano de buzon" onChange={(value) => onChange({ quotaGb: value })} placeholder="5" suffix="GB" value={form.quotaGb} />
+                <FormInput label="Contrasena de destino" onChange={(value) => onChange({ destinationPassword: value })} type="password" value={form.destinationPassword} />
+                <FormInput label="Confirmar contrasena" onChange={(value) => onChange({ destinationConfirmPassword: value })} type="password" value={form.destinationConfirmPassword} />
+                {!passwordMatches && (
+                  <div className="md:col-span-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+                    La contrasena del buzon nuevo debe tener al menos 8 caracteres y coincidir con la confirmacion.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <button className="mt-4 text-xs font-bold text-blue-600 hover:text-blue-800" onClick={() => setAdvancedOpen((current) => !current)} type="button">
+            {advancedOpen ? "Ocultar opciones avanzadas" : "Mostrar opciones avanzadas"}
+          </button>
+
+          {advancedOpen && (
+            <div className="mt-4 grid gap-4 rounded-lg border border-slate-200 bg-slate-50 p-3 md:grid-cols-2">
+              <FormInput label="Host IMAP de origen" onChange={(value) => onChange({ sourceHost: value })} placeholder="imap.dominio.com" value={form.sourceHost} />
+              <FormInput label="Puerto IMAP de origen" onChange={(value) => onChange({ sourcePort: value })} placeholder="Auto" value={form.sourcePort} />
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-bold text-slate-600">Cifrado IMAP de origen</span>
+                <select
+                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  onChange={(event) => onChange({ sourceEncryption: event.target.value as ImportMailForm["sourceEncryption"] })}
+                  value={form.sourceEncryption}
+                >
+                  <option value="auto">Automatico</option>
+                  <option value="ssl">IMAP sobre SSL</option>
+                  <option value="plain">IMAP simple</option>
+                </select>
+              </label>
+              <FormInput label="Tiempo de espera IMAP" onChange={(value) => onChange({ sourceTimeout: value })} placeholder="30" suffix="seg" value={form.sourceTimeout} />
+              <div className="md:col-span-2">
+                <FormInput label="Separador de carpeta IMAP de origen" onChange={(value) => onChange({ sourceFolderSeparator: value })} placeholder="Auto" value={form.sourceFolderSeparator} />
+              </div>
+            </div>
+          )}
+
+          {isSaving && (
+            <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800">
+              Importacion en curso. No cierres esta ventana hasta recibir confirmacion.
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-5 py-3">
+          <Button disabled={isSaving} onClick={onClose} size="sm" type="button" variant="outline">Cancelar</Button>
+          <Button disabled={!canSave} onClick={onSave} size="sm" type="button">
+            {isSaving ? "Importando..." : "Aceptar"}
           </Button>
         </div>
       </div>

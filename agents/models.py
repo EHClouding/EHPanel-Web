@@ -145,6 +145,7 @@ class AgentJob(models.Model):
         LIST_MAILBOXES = "list_mailboxes", "List mailboxes"
         SET_MAILBOX_AUTORESPONDER = "set_mailbox_autoresponder", "Set mailbox autoresponder"
         SET_MAILBOX_ANTISPAM = "set_mailbox_antispam", "Set mailbox antispam"
+        IMPORT_MAILBOX = "import_mailbox", "Import mailbox"
         ENABLE_DKIM = "enable_dkim", "Enable DKIM"
         COLLECT_MAILBOX_USAGE = "collect_mailbox_usage", "Collect mailbox usage"
         TEST_MAIL_DELIVERY = "test_mail_delivery", "Test mail delivery"

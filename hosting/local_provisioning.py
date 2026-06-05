@@ -117,12 +117,13 @@ def execute_local_job(job):
         command = ["sudo", "-n", helper]
 
     try:
+        timeout = 7200 if job.job_type == AgentJob.Type.IMPORT_MAILBOX else 300
         completed = subprocess.run(
             command,
             input=json.dumps(payload),
             text=True,
             capture_output=True,
-            timeout=300,
+            timeout=timeout,
             check=False,
         )
     except FileNotFoundError:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import imaplib
 import os
 import re
 import secrets
@@ -1816,6 +1817,157 @@ def delete_mailbox(payload, settings):
     return ok(email=email, deleted=True)
 
 
+def imap_host_candidates(source_email, source_host):
+    if source_host:
+        return [source_host]
+    domain = source_email.split("@", 1)[1] if "@" in source_email else source_email
+    return [f"imap.{domain}", f"mail.{domain}", domain]
+
+
+def connect_source_imap(payload):
+    source_email = str(payload.get("source_email") or "").strip()
+    source_host = str(payload.get("source_host") or "").strip()
+    source_port = int(payload.get("source_port") or 0)
+    encryption = str(payload.get("source_encryption") or "auto").lower()
+    timeout = int(payload.get("source_timeout") or 30)
+    password = str(payload.get("source_password") or "")
+    last_error = ""
+    for host in imap_host_candidates(source_email, source_host):
+        attempts = []
+        if encryption == "ssl":
+            attempts.append(("ssl", source_port or 993))
+        elif encryption == "plain":
+            attempts.append(("plain", source_port or 143))
+        else:
+            attempts.extend([("ssl", source_port or 993), ("plain", source_port or 143)])
+        for mode, port in attempts:
+            client = None
+            try:
+                if mode == "ssl":
+                    client = imaplib.IMAP4_SSL(host, port, timeout=timeout)
+                else:
+                    client = imaplib.IMAP4(host, port, timeout=timeout)
+                client.login(source_email, password)
+                return client, host, port, mode
+            except Exception as exc:
+                last_error = f"{host}:{port} {mode}: {exc}"
+                try:
+                    if client:
+                        client.logout()
+                except Exception:
+                    pass
+    raise RuntimeError(f"No se pudo conectar al IMAP de origen. {last_error}")
+
+
+def parse_imap_list_entry(entry):
+    if isinstance(entry, bytes):
+        entry = entry.decode("utf-8", errors="replace")
+    entry = str(entry or "").strip()
+    match = re.search(r'\) "(?P<sep>[^"]*)" (?P<name>.+)$', entry)
+    if not match:
+        return "", entry.strip('"')
+    name = match.group("name").strip()
+    if name.startswith('"') and name.endswith('"'):
+        name = name[1:-1]
+    return match.group("sep") or "", name
+
+
+def maildir_folder_path(maildir, folder, separator=""):
+    folder = str(folder or "INBOX").strip().strip('"')
+    if folder.upper() == "INBOX":
+        return maildir
+    separator = separator or "/"
+    parts = [safe_mail_local(part) for part in folder.split(separator) if part and part.upper() != "INBOX"]
+    if not parts:
+        return maildir
+    return maildir / ("." + ".".join(parts))
+
+
+def ensure_maildir_dirs(path):
+    for name in ["cur", "new", "tmp"]:
+        (path / name).mkdir(parents=True, exist_ok=True)
+
+
+def write_maildir_message(maildir_folder, raw_message, index):
+    ensure_maildir_dirs(maildir_folder)
+    stamp = f"{int(time.time())}.M{int(time.time_ns() % 1000000)}P{os.getpid()}Q{index}.ehpanel"
+    tmp_path = maildir_folder / "tmp" / stamp
+    new_path = maildir_folder / "new" / stamp
+    tmp_path.write_bytes(raw_message)
+    tmp_path.rename(new_path)
+    return new_path
+
+
+def import_mailbox(payload, settings):
+    if not settings.get("provision_mail", True):
+        return ok(skipped=True, reason="mail_disabled")
+    email = payload["email"]
+    destination_base = mailbox_path(email)
+    maildir = destination_base / "Maildir"
+    ensure_maildir_dirs(maildir)
+    client = None
+    imported_messages = 0
+    imported_bytes = 0
+    folders_seen = []
+    try:
+        client, host, port, mode = connect_source_imap(payload)
+        status, raw_folders = client.list()
+        if status != "OK" or not raw_folders:
+            raw_folders = [b'(\\HasNoChildren) "/" "INBOX"']
+        configured_separator = str(payload.get("source_folder_separator") or "")
+        for raw_folder in raw_folders:
+            separator, folder = parse_imap_list_entry(raw_folder)
+            separator = configured_separator or separator or "/"
+            if not folder or "\\Noselect" in str(raw_folder):
+                continue
+            folder_path = maildir_folder_path(maildir, folder, separator)
+            ensure_maildir_dirs(folder_path)
+            status, _selected = client.select(f'"{folder}"', readonly=True)
+            if status != "OK":
+                continue
+            status, search_data = client.uid("SEARCH", None, "ALL")
+            if status != "OK" or not search_data:
+                continue
+            uids = search_data[0].split()
+            folder_count = 0
+            for index, uid in enumerate(uids, start=1):
+                status, fetch_data = client.uid("FETCH", uid, "(RFC822)")
+                if status != "OK" or not fetch_data:
+                    continue
+                raw_message = b""
+                for item in fetch_data:
+                    if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], bytes):
+                        raw_message = item[1]
+                        break
+                if not raw_message:
+                    continue
+                write_maildir_message(folder_path, raw_message, imported_messages + index)
+                imported_messages += 1
+                folder_count += 1
+                imported_bytes += len(raw_message)
+            folders_seen.append({"folder": folder, "messages": folder_count})
+    finally:
+        try:
+            if client:
+                client.logout()
+        except Exception:
+            pass
+    if user_exists("vmail"):
+        run(["chown", "-R", "vmail:vmail", str(destination_base)], check=False)
+    restore_selinux_context(destination_base)
+    used_mb = round(imported_bytes / 1024 / 1024)
+    return ok(
+        email=email,
+        imported_messages=imported_messages,
+        imported_bytes=imported_bytes,
+        used_mb=used_mb,
+        folders=folders_seen,
+        source_host=host,
+        source_port=port,
+        source_encryption=mode,
+    )
+
+
 def account_lock(payload, locked):
     username = payload["username"]
     validate_username(username)
@@ -2999,6 +3151,8 @@ def main():
             return mailbox_json_job(payload, ".ehpanel-antispam.json")
         if job_type == "set_mailbox_autoresponder":
             return mailbox_json_job(payload, ".ehpanel-autoresponder.json")
+        if job_type == "import_mailbox":
+            return import_mailbox(payload, settings)
         if job_type == "collect_software_info":
             return collect_software_info(payload, settings)
         if job_type == "apply_software_settings":

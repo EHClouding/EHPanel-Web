@@ -1469,6 +1469,22 @@ export type CreateMailboxPayload = {
   autoresponder_schedule?: boolean
 }
 
+export type ImportMailboxPayload = {
+  account: string
+  source_email: string
+  source_password: string
+  destination_mode: "existing" | "new"
+  destination_mailbox?: number | null
+  destination_email?: string
+  destination_password?: string
+  quota_mb?: number
+  source_host?: string
+  source_port?: number | null
+  source_encryption?: "auto" | "ssl" | "plain"
+  source_timeout?: number
+  source_folder_separator?: string
+}
+
 export type UpdateMailboxPayload = Partial<Omit<CreateMailboxPayload, "account" | "email">>
 
 export type DbEngine = "mariadb" | "postgresql"
@@ -2668,6 +2684,12 @@ export const hostingApi = {
 
   createMailbox: (payload: CreateMailboxPayload) =>
     apiFetch<HostingMailbox>("/hosting/mailboxes/", {
+      body: JSON.stringify(payload),
+      method: "POST",
+    }),
+
+  importMailbox: (payload: ImportMailboxPayload) =>
+    apiFetch<{ status: string; job: string; mailbox: HostingMailbox }>("/hosting/mailboxes/import/", {
       body: JSON.stringify(payload),
       method: "POST",
     }),

@@ -101,6 +101,7 @@ from .serializers import (
     HostingApplicationSerializer,
     InstallWordPressSerializer,
     InstallCatalogAppSerializer,
+    ImportMailboxSerializer,
     IssueDomainSSLSerializer,
     ProvisionHostingAccountSerializer,
     ProvisioningRunSerializer,
@@ -159,6 +160,7 @@ from .services import (
     delete_ftp_user,
     export_database,
     import_database,
+    import_mailbox as import_mailbox_service,
     issue_domain_ssl,
     sync_global_nameserver_template,
     collect_waf_events,
@@ -2372,6 +2374,23 @@ class HostingMailboxViewSet(viewsets.ModelViewSet):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"url": url})
+
+    @action(detail=False, methods=["post"], url_path="import")
+    def import_mailbox(self, request):
+        serializer = ImportMailboxSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        mailbox, job = import_mailbox_service(
+            serializer.validated_data["account"],
+            dict(serializer.validated_data),
+        )
+        return Response(
+            {
+                "status": job.status,
+                "job": str(job.id),
+                "mailbox": HostingMailboxSerializer(mailbox, context=self.get_serializer_context()).data,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     @action(detail=False, methods=["post"], url_path="sync")
     def sync(self, request):

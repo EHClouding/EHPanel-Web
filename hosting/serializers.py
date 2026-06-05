@@ -1327,6 +1327,60 @@ class CreateMailboxSerializer(serializers.Serializer):
         return attrs
 
 
+class ImportMailboxSerializer(serializers.Serializer):
+    account = serializers.PrimaryKeyRelatedField(queryset=HostingAccount.objects.select_related("plan", "node").all())
+    source_email = serializers.EmailField()
+    source_password = serializers.CharField(write_only=True, min_length=1, max_length=255)
+    destination_mode = serializers.ChoiceField(choices=["existing", "new"], default="existing")
+    destination_mailbox = serializers.PrimaryKeyRelatedField(queryset=HostingMailbox.objects.select_related("account").all(), required=False, allow_null=True)
+    destination_email = serializers.EmailField(required=False, allow_blank=True)
+    destination_password = serializers.CharField(write_only=True, min_length=8, max_length=255, required=False, allow_blank=True)
+    quota_mb = serializers.IntegerField(min_value=1, default=1024)
+    source_host = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    source_port = serializers.IntegerField(min_value=1, max_value=65535, required=False, allow_null=True)
+    source_encryption = serializers.ChoiceField(choices=["auto", "ssl", "plain"], default="auto")
+    source_timeout = serializers.IntegerField(min_value=5, max_value=300, default=30)
+    source_folder_separator = serializers.CharField(max_length=8, required=False, allow_blank=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get("request")
+        if request:
+            allowed_accounts = scoped_accounts(HostingAccount.objects.select_related("plan", "node"), request.user)
+            self.fields["account"].queryset = allowed_accounts
+            self.fields["destination_mailbox"].queryset = HostingMailbox.objects.filter(account__in=scoped_accounts(HostingAccount.objects.all(), request.user))
+
+    def validate(self, attrs):
+        account = attrs["account"]
+        request = self.context.get("request")
+        if request and not user_can_access_account(request.user, account):
+            raise serializers.ValidationError({"account": "No tienes acceso a esta cuenta hosting."})
+        attrs["source_email"] = attrs["source_email"].lower()
+        mode = attrs.get("destination_mode") or "existing"
+        if mode == "existing":
+            mailbox = attrs.get("destination_mailbox")
+            if not mailbox:
+                raise serializers.ValidationError({"destination_mailbox": "Selecciona un buzon destino."})
+            if mailbox.account_id != account.id:
+                raise serializers.ValidationError({"destination_mailbox": "El buzon destino no pertenece a esta cuenta."})
+            attrs["destination_email"] = mailbox.email
+        else:
+            destination_email = (attrs.get("destination_email") or "").lower()
+            destination_password = attrs.get("destination_password") or ""
+            if not destination_email:
+                raise serializers.ValidationError({"destination_email": "El email de destino es requerido."})
+            if not destination_email.endswith(f"@{account.primary_domain}"):
+                raise serializers.ValidationError({"destination_email": f"El correo debe pertenecer a {account.primary_domain}."})
+            if HostingMailbox.objects.filter(email=destination_email).exists():
+                raise serializers.ValidationError({"destination_email": "Ya existe este buzon."})
+            if account.plan and account.mailboxes.count() >= account.plan.max_mailboxes:
+                raise serializers.ValidationError({"account": "La cuenta ya alcanzo el limite de buzones del plan."})
+            if not destination_password:
+                raise serializers.ValidationError({"destination_password": "La contrasena de destino es requerida."})
+            attrs["destination_email"] = destination_email
+        return attrs
+
+
 class UpdateMailboxSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, min_length=8, max_length=255, required=False, allow_blank=True)
     quota_mb = serializers.IntegerField(min_value=1, required=False)
