@@ -77,6 +77,11 @@ export function DatabasesPage() {
   const databaseUserPreview = prefixedDatabaseIdentifier(accountPrefix, form.username || "app_user")
   const userFormAccount = accounts.find((account) => account.id === userForm.account) ?? selectedAccount
   const standaloneUserPreview = prefixedDatabaseIdentifier(userFormAccount?.username ?? "", userForm.username || "app_user")
+  const compatibleDatabaseUsers = useMemo(
+    () => users.filter((user) => user.account === selectedAccount?.id && user.engine === form.engine),
+    [form.engine, selectedAccount?.id, users],
+  )
+  const hasSelectedCompatibleDatabaseUser = compatibleDatabaseUsers.some((user) => String(user.id) === form.databaseUser)
 
   const loadData = async () => {
     setLoading(true)
@@ -103,6 +108,12 @@ export function DatabasesPage() {
   useEffect(() => {
     void loadData()
   }, [])
+
+  useEffect(() => {
+    if (!isCreateOpen || form.userMode !== "existing") return
+    if (hasSelectedCompatibleDatabaseUser) return
+    setForm((current) => ({ ...current, databaseUser: compatibleDatabaseUsers[0] ? String(compatibleDatabaseUsers[0].id) : "" }))
+  }, [compatibleDatabaseUsers, form.userMode, hasSelectedCompatibleDatabaseUser, isCreateOpen])
 
   const filteredDatabases = useMemo(() => {
     return databases.filter((database) => {
@@ -385,9 +396,25 @@ export function DatabasesPage() {
               <TextInput label="Nombre BD" onChange={(value) => setForm((current) => ({ ...current, name: value }))} placeholder={databaseNamePreview} value={form.name} />
               <SelectInput label="Tipo" onChange={(value) => setForm((current) => ({ ...current, engine: value as DbEngine, databaseUser: "" }))} options={[["mariadb", "MariaDB"], ["postgresql", "PostgreSQL"]]} value={form.engine} />
             </div>
-            <SelectInput label="Asignar usuario" onChange={(value) => setForm((current) => ({ ...current, userMode: value as "new" | "existing" }))} options={[["new", "Crear usuario nuevo"], ["existing", "Usar usuario existente"]]} value={form.userMode} />
+            <SelectInput
+              label="Asignar usuario"
+              onChange={(value) =>
+                setForm((current) => ({
+                  ...current,
+                  databaseUser: value === "existing" ? compatibleDatabaseUsers[0] ? String(compatibleDatabaseUsers[0].id) : "" : "",
+                  userMode: value as "new" | "existing",
+                }))
+              }
+              options={[["new", "Crear usuario nuevo"], ["existing", "Usar usuario existente"]]}
+              value={form.userMode}
+            />
             {form.userMode === "existing" ? (
-              <SelectInput label="Usuario existente" onChange={(value) => setForm((current) => ({ ...current, databaseUser: value }))} options={users.filter((user) => user.engine === form.engine).map((user) => [String(user.id), user.username])} value={form.databaseUser} />
+              <SelectInput
+                label="Usuario existente"
+                onChange={(value) => setForm((current) => ({ ...current, databaseUser: value }))}
+                options={compatibleDatabaseUsers.length > 0 ? compatibleDatabaseUsers.map((user) => [String(user.id), user.username]) : [["", `No hay usuarios ${engineLabels[form.engine]} disponibles`]]}
+                value={form.databaseUser}
+              />
             ) : (
               <div className="grid gap-4 sm:grid-cols-2">
                 <TextInput label="Usuario BD" onChange={(value) => setForm((current) => ({ ...current, username: value }))} placeholder={databaseUserPreview} value={form.username} />
@@ -395,7 +422,7 @@ export function DatabasesPage() {
               </div>
             )}
             <SelectInput label="Control de acceso" onChange={(value) => setForm((current) => ({ ...current, access: value as DbAccess }))} options={accessOptions()} value={form.access} />
-            <ModalFooter disabled={!form.name.trim() || (form.userMode === "new" && (!form.username.trim() || form.password.length < 8)) || (form.userMode === "existing" && !form.databaseUser)} onCancel={() => setIsCreateOpen(false)} submitLabel="Crear base de datos" />
+            <ModalFooter disabled={!form.name.trim() || (form.userMode === "new" && (!form.username.trim() || form.password.length < 8)) || (form.userMode === "existing" && !hasSelectedCompatibleDatabaseUser)} onCancel={() => setIsCreateOpen(false)} submitLabel="Crear base de datos" />
           </form>
         </Modal>
       )}
