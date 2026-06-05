@@ -1865,6 +1865,12 @@ export const hostingApi = {
       method: "POST",
     }),
 
+  changeAccountPassword: (id: string, password: string) =>
+    apiFetch<{ status: string; job: string }>(`/hosting/accounts/${id}/change-password/`, {
+      body: JSON.stringify({ password }),
+      method: "POST",
+    }),
+
   resellers: async (params?: { search?: string; status?: string }) => {
     const search = new URLSearchParams()
     if (params?.search) search.set("search", params.search)

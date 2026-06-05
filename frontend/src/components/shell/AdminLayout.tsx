@@ -2819,6 +2819,7 @@ function AdminHostingAccountsPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [viewingAccount, setViewingAccount] = useState<HostingAccount | null>(null)
+  const [changingPasswordAccount, setChangingPasswordAccount] = useState<HostingAccount | null>(null)
 
   const loadAccounts = () => {
     setIsLoading(true)
@@ -2946,6 +2947,7 @@ function AdminHostingAccountsPage() {
                 <td className="px-4 py-3">
                   <div className="flex justify-end gap-1">
                     <Button onClick={() => setViewingAccount(account)} size="sm" variant="outline">Ver</Button>
+                    <Button onClick={() => setChangingPasswordAccount(account)} size="sm" variant="outline"><KeyRound className="h-4 w-4" />Contraseña</Button>
                     <Button onClick={() => viewAsClient(account)} size="sm" variant="outline">Ver como Cliente</Button>
                     <Button onClick={() => void toggleSuspendAccount(account)} size="sm" variant="outline">{account.status === "suspended" ? "Reactivar" : "Suspender"}</Button>
                   </div>
@@ -2980,6 +2982,16 @@ function AdminHostingAccountsPage() {
         />
       ) : null}
       {viewingAccount ? <HostingAccountDetailModal account={viewingAccount} onClose={() => setViewingAccount(null)} onUpdated={(updated) => setAccounts((current) => current.map((item) => (item.id === updated.id ? updated : item)))} /> : null}
+      {changingPasswordAccount ? (
+        <ChangeHostingAccountPasswordModal
+          account={changingPasswordAccount}
+          onClose={() => setChangingPasswordAccount(null)}
+          onSaved={() => {
+            setMessage(`Cambio de contraseña enviado: ${changingPasswordAccount.primary_domain}`)
+            setChangingPasswordAccount(null)
+          }}
+        />
+      ) : null}
     </div>
   )
 }
@@ -3162,6 +3174,80 @@ function CreateAdminHostingAccountModal({
         </div>
       </div>
     </div>
+  )
+}
+
+function ChangeHostingAccountPasswordModal({ account, onClose, onSaved }: { account: HostingAccount; onClose: () => void; onSaved: () => void }) {
+  const [password, setPassword] = useState(generateHostingPassword())
+  const [confirmation, setConfirmation] = useState("")
+  const [error, setError] = useState("")
+  const [isSaving, setIsSaving] = useState(false)
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    setError("")
+    const cleanPassword = password.trim()
+    if (cleanPassword.length < 8) {
+      setError("La contraseña debe tener al menos 8 caracteres.")
+      return
+    }
+    if (cleanPassword !== confirmation.trim()) {
+      setError("La confirmacion no coincide con la contraseña.")
+      return
+    }
+    setIsSaving(true)
+    try {
+      await hostingApi.changeAccountPassword(account.id, cleanPassword)
+      onSaved()
+    } catch (reason) {
+      setError(readAdminError(reason, "No se pudo cambiar la contraseña de la cuenta."))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <AdminModalFrame kicker={account.username} onClose={onClose} title="Cambiar contraseña">
+      <form className="space-y-4" onSubmit={submit}>
+        {error ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{error}</div> : null}
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">
+          Esta accion cambia el acceso principal del usuario del sistema y SFTP/FTP asociado a la cuenta. Billing podra sincronizar un nuevo valor despues si envia otra orden.
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <AdminStatus label="Dominio" value={account.primary_domain} />
+          <AdminStatus label="Usuario" value={account.username} />
+        </div>
+        <label className="text-sm font-bold text-slate-700">
+          Nueva contraseña
+          <div className="mt-1 flex gap-2">
+            <input
+              className="h-10 min-w-0 flex-1 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-500"
+              onChange={(event) => setPassword(event.target.value)}
+              type="password"
+              value={password}
+            />
+            <Button onClick={() => {
+              const generated = generateHostingPassword()
+              setPassword(generated)
+              setConfirmation(generated)
+            }} size="sm" type="button" variant="outline">Generar</Button>
+          </div>
+        </label>
+        <label className="text-sm font-bold text-slate-700">
+          Confirmar contraseña
+          <input
+            className="mt-1 h-10 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-500"
+            onChange={(event) => setConfirmation(event.target.value)}
+            type="password"
+            value={confirmation}
+          />
+        </label>
+        <div className="flex justify-end gap-2">
+          <Button disabled={isSaving} onClick={onClose} type="button" variant="outline">Cancelar</Button>
+          <Button disabled={isSaving} type="submit">{isSaving ? "Enviando..." : "Cambiar contraseña"}</Button>
+        </div>
+      </form>
+    </AdminModalFrame>
   )
 }
 
