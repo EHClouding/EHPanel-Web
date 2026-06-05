@@ -52,6 +52,7 @@ from .serializers import (
     ApiKeyCredentialSerializer,
     ChangeAccountPasswordSerializer,
     ChangeOwnPasswordSerializer,
+    ChangeDocumentRootSerializer,
     ChangeMailboxPasswordSerializer,
     CreateHostingAccountExportSerializer,
     CreateHostingResellerProfileSerializer,
@@ -132,6 +133,7 @@ from .services import (
     consume_database_sso,
     consume_webmail_sso,
     create_domain,
+    change_domain_document_root,
     change_database_password,
     check_repair_database,
     change_mailbox_password,
@@ -3367,6 +3369,56 @@ class HostingDomainViewSet(viewsets.ModelViewSet):
             serializer.validated_data.get("document_root", ""),
         )
         return Response(HostingDomainSerializer(hosting_domain, context=self.get_serializer_context()).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="change-document-root")
+    def change_document_root(self, request, pk=None):
+        hosting_domain = self.get_object()
+        serializer = ChangeDocumentRootSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        previous_root = hosting_domain.document_root or "public_html"
+        jobs = change_domain_document_root(hosting_domain, serializer.validated_data["document_root"])
+        hosting_domain.refresh_from_db()
+        audit_action(
+            request,
+            AuditLog.Action.ACCOUNT_UPDATED,
+            account=hosting_domain.account,
+            target=hosting_domain,
+            metadata={
+                "domain_action": "change_document_root",
+                "domain": hosting_domain.domain,
+                "previous_root": previous_root,
+                "document_root": hosting_domain.document_root,
+                "jobs": [str(job.id) for job in jobs],
+            },
+        )
+        return Response({
+            "domain": HostingDomainSerializer(hosting_domain, context=self.get_serializer_context()).data,
+            "jobs": [str(job.id) for job in jobs],
+        })
+
+    @action(detail=True, methods=["post"], url_path="restore-document-root")
+    def restore_document_root(self, request, pk=None):
+        hosting_domain = self.get_object()
+        previous_root = hosting_domain.document_root or "public_html"
+        jobs = change_domain_document_root(hosting_domain, "public_html")
+        hosting_domain.refresh_from_db()
+        audit_action(
+            request,
+            AuditLog.Action.ACCOUNT_UPDATED,
+            account=hosting_domain.account,
+            target=hosting_domain,
+            metadata={
+                "domain_action": "restore_document_root",
+                "domain": hosting_domain.domain,
+                "previous_root": previous_root,
+                "document_root": hosting_domain.document_root,
+                "jobs": [str(job.id) for job in jobs],
+            },
+        )
+        return Response({
+            "domain": HostingDomainSerializer(hosting_domain, context=self.get_serializer_context()).data,
+            "jobs": [str(job.id) for job in jobs],
+        })
 
     def destroy(self, request, *args, **kwargs):
         hosting_domain = self.get_object()

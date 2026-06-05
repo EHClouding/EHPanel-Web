@@ -1031,6 +1031,21 @@ class CreateDomainSerializer(serializers.Serializer):
         return attrs
 
 
+class ChangeDocumentRootSerializer(serializers.Serializer):
+    document_root = serializers.RegexField(
+        r"^[A-Za-z0-9][A-Za-z0-9_./-]{0,180}$",
+        required=True,
+    )
+
+    def validate_document_root(self, value):
+        document_root = str(value or "").strip().strip("/").replace("\\", "/")
+        if not document_root:
+            raise serializers.ValidationError("La carpeta destino es requerida.")
+        if document_root.startswith("/") or any(segment in {"", ".", ".."} for segment in document_root.split("/")):
+            raise serializers.ValidationError("La carpeta debe ser relativa a la cuenta y no puede contener . ni ..")
+        return document_root
+
+
 class SyncDomainDNSSerializer(serializers.Serializer):
     public_ip = serializers.IPAddressField(protocol="IPv4", required=False)
 

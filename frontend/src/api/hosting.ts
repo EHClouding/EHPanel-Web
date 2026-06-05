@@ -1063,6 +1063,11 @@ export type HostingDomain = {
   updated_at: string
 }
 
+export type ChangeDocumentRootResponse = {
+  domain: HostingDomain
+  jobs: string[]
+}
+
 export type WebProtectionSettings = {
   force_https: boolean
   hsts_enabled: boolean
@@ -2308,6 +2313,18 @@ export const hostingApi = {
   createDomain: (payload: CreateDomainPayload) =>
     apiFetch<HostingDomain>("/hosting/domains/", {
       body: JSON.stringify(payload),
+      method: "POST",
+    }),
+
+  changeDomainDocumentRoot: (id: number, payload: { document_root: string }) =>
+    apiFetch<ChangeDocumentRootResponse>(`/hosting/domains/${id}/change-document-root/`, {
+      body: JSON.stringify(payload),
+      method: "POST",
+    }),
+
+  restoreDomainDocumentRoot: (id: number) =>
+    apiFetch<ChangeDocumentRootResponse>(`/hosting/domains/${id}/restore-document-root/`, {
+      body: JSON.stringify({}),
       method: "POST",
     }),
 

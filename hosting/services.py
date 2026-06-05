@@ -2067,6 +2067,55 @@ def create_domain(account, domain, public_ip, domain_type=None, document_root=""
     return hosting_domain
 
 
+def change_domain_document_root(hosting_domain, document_root, issue_ssl_if_active=True):
+    document_root = str(document_root or "public_html").strip().strip("/").replace("\\", "/")
+    if not document_root or document_root.startswith("/") or any(segment in {"", ".", ".."} for segment in document_root.split("/")):
+        raise ValueError("La carpeta debe ser relativa a la cuenta y no puede contener . ni ..")
+    account = hosting_domain.account
+    jobs = []
+    with transaction.atomic():
+        hosting_domain.document_root = document_root
+        hosting_domain.save(update_fields=["document_root", "updated_at"])
+        jobs.append(queue_account_job(
+            account,
+            AgentJob.Type.FILE_MKDIR,
+            {
+                "username": account.username,
+                "path": document_root,
+            },
+        ))
+        job_type = (
+            AgentJob.Type.PROVISION_OPENLITESPEED_HOSTING
+            if account.web_engine == HostingAccount.WebEngine.OPENLITESPEED
+            else AgentJob.Type.PROVISION_HOSTING
+        )
+        jobs.append(queue_account_job(
+            account,
+            job_type,
+            {
+                "username": account.username,
+                "domain": hosting_domain.domain,
+                "php_version": account.php_version,
+                "document_root": document_root,
+                "write_default_index": False,
+                "limits": {
+                    "disk_mb": account.disk_mb,
+                    "bandwidth_mb": account.bandwidth_mb,
+                    "memory_mb": account.memory_mb,
+                    "cpu_pct": account.cpu_pct,
+                },
+            },
+        ))
+        if issue_ssl_if_active and hosting_domain.ssl_status == HostingDomain.Status.ACTIVE:
+            jobs.append(issue_domain_ssl(
+                hosting_domain,
+                email=account.customer_email or f"admin@{hosting_domain.domain}",
+                include_www=hosting_domain.domain_type != HostingDomain.DomainType.SUBDOMAIN,
+                force_renewal=False,
+            ))
+    return jobs
+
+
 def sync_domain_dns(hosting_domain, public_ip="", delete_records=None, apply_template=False, overwrite_template_records=None):
     if apply_template:
         sync_domain_dns_from_template(hosting_domain, public_ip, overwrite_template_records)
