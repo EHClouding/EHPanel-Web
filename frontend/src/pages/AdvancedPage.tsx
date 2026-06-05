@@ -15,7 +15,7 @@ import {
 import type { ReactNode } from "react"
 import { useEffect, useMemo, useState } from "react"
 
-import { hostingApi, type AdvancedSummaryResponse, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind } from "@/api/hosting"
+import { hostingApi, type AdvancedSummaryResponse, type GitDeployDetection, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind } from "@/api/hosting"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -79,6 +79,7 @@ const defaultGitDeployValues: Record<string, string> = {
   package_manager: "auto",
   port: "3001",
   proxy_routes: "/api/,/storage/",
+  runtime: "auto",
   serve_frontend: "true",
   working_dir: "apps/app",
 }
@@ -481,8 +482,34 @@ function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: strin
   const [name, setName] = useState("")
   const [enabled, setEnabled] = useState(true)
   const [values, setValues] = useState<Record<string, string>>(() => kind === "git_repo" ? defaultGitDeployValues : {})
+  const [detection, setDetection] = useState<GitDeployDetection | null>(null)
+  const [detecting, setDetecting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
+
+  async function detectGit() {
+    if (kind !== "git_repo") return
+    setDetecting(true)
+    setError("")
+    try {
+      const result = await hostingApi.detectGitDeploy({
+        account: accountId,
+        auth_token: values.auth_token,
+        branch: values.branch || "main",
+        repo_url: values.repo_url,
+      })
+      setDetection(result)
+      setValues({ ...values, ...result.config, auth_token: values.auth_token })
+      if (!name.trim()) {
+        const suggested = result.config.instance_id || result.config.repo_url || ""
+        setName(String(suggested).replace(/[-_]/g, " "))
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo detectar el repositorio.")
+    } finally {
+      setDetecting(false)
+    }
+  }
 
   async function save() {
     setSaving(true)
@@ -505,7 +532,7 @@ function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: strin
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4">
-      <div className="w-full max-w-2xl rounded-lg bg-white shadow-2xl">
+      <div className="flex max-h-[92vh] w-full max-w-2xl flex-col rounded-lg bg-white shadow-2xl">
         <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
           <div>
             <div className="eh-kicker">Avanzado</div>
@@ -515,13 +542,40 @@ function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: strin
             <XCircle className="h-4 w-4" />
           </button>
         </div>
-        <div className="space-y-4 px-5 py-4">
+        <div className="space-y-4 overflow-y-auto px-5 py-4">
           {error ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{error}</div> : null}
           <label className="block">
             <span className="mb-1.5 block text-xs font-bold text-slate-600">Nombre visible</span>
             <input className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-500" onChange={(event) => setName(event.target.value)} placeholder="Nombre para identificar esta configuracion" value={name} />
           </label>
           <div className="grid gap-4 md:grid-cols-2">
+            {kind === "git_repo" ? (
+              <div className="md:col-span-2 rounded-md border border-blue-100 bg-blue-50 px-3 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-black text-slate-900">Preflight Git</div>
+                    <div className="text-xs font-medium text-slate-600">Detecta runtime, carpetas, comandos y variables antes de instalar.</div>
+                  </div>
+                  <Button disabled={detecting || !values.repo_url} onClick={() => void detectGit()} size="sm" type="button" variant="outline">
+                    <Search className="h-4 w-4" />{detecting ? "Detectando..." : "Detectar"}
+                  </Button>
+                </div>
+                {detection ? (
+                  <div className="mt-3 grid gap-2 text-xs text-slate-700 md:grid-cols-2">
+                    <div><span className="font-bold">Runtime:</span> {detection.detected_runtime}</div>
+                    <div><span className="font-bold">Confianza:</span> {detection.confidence}</div>
+                    {Object.entries(detection.summary || {}).filter(([, value]) => value).map(([key, value]) => (
+                      <div key={key}><span className="font-bold">{labelKey(key)}:</span> {String(value)}</div>
+                    ))}
+                    {detection.warnings?.length ? (
+                      <div className="md:col-span-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+                        {detection.warnings.join(" ")}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {fields.map((field) => (
               <label className={cn("block", field.multiline ? "md:col-span-2" : "")} key={field.key}>
                 <span className="mb-1.5 block text-xs font-bold text-slate-600">{field.label}</span>
@@ -549,7 +603,7 @@ function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: strin
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
           <Button disabled={saving} onClick={onClose} size="sm" variant="outline">Cancelar</Button>
-          <Button disabled={saving} onClick={() => void save()} size="sm">Guardar</Button>
+          <Button disabled={saving} onClick={() => void save()} size="sm">{kind === "git_repo" ? "Guardar y desplegar" : "Guardar"}</Button>
         </div>
       </div>
     </div>
@@ -569,15 +623,22 @@ function fieldsForKind(kind: HostingAdvancedKind) {
       { key: "repo_url", label: "Repositorio Git", placeholder: "https://github.com/cliente/proyecto.git" },
       { key: "branch", label: "Branch", placeholder: "main" },
       { key: "auth_token", label: "Token PAT", placeholder: "github_pat_... / ghp_...", secret: true, help: "Se usa para este deploy y no se guarda en la configuracion avanzada." },
+      { key: "runtime", kind: "select", label: "Runtime", options: [{ label: "Auto", value: "auto" }, { label: "Node / Express", value: "node" }, { label: "Django", value: "django" }], placeholder: "auto" },
       { key: "working_dir", label: "Ruta de instalacion", placeholder: "apps/starsystem", help: "Ruta relativa o absoluta dentro de la cuenta hosting." },
       { key: "instance_id", label: "ID app", placeholder: "starsystem" },
       { key: "port", label: "Puerto interno", placeholder: "3001" },
       { key: "backend_dir", label: "Directorio backend", placeholder: "backend" },
       { key: "frontend_dir", label: "Directorio frontend", placeholder: "frontend" },
+      { key: "django_settings_module", label: "Django settings", placeholder: "config.settings.production", help: "Auto si manage.py lo declara." },
+      { key: "project_module", label: "Modulo proyecto", placeholder: "config" },
+      { key: "collectstatic", kind: "checkbox", label: "Collectstatic", placeholder: "" },
+      { key: "workers", label: "Workers", placeholder: "2" },
       { key: "package_manager", kind: "select", label: "Package manager", options: [{ label: "Auto", value: "auto" }, { label: "npm", value: "npm" }, { label: "pnpm", value: "pnpm" }, { label: "yarn", value: "yarn" }], placeholder: "auto" },
+      { key: "frontend_package_manager", kind: "select", label: "Frontend PM", options: [{ label: "Auto", value: "auto" }, { label: "npm", value: "npm" }, { label: "pnpm", value: "pnpm" }, { label: "yarn", value: "yarn" }], placeholder: "auto" },
       { key: "install_command", label: "Install backend", placeholder: "Auto segun lockfile", help: "Vacio = npm/pnpm/yarn detectado automaticamente." },
       { key: "build_command", label: "Build backend", placeholder: "Auto si existe script build", help: "Vacio = usa el script build si existe." },
       { key: "migrate_command", label: "Migracion", placeholder: "npx prisma migrate deploy" },
+      { key: "collectstatic_command", label: "Collectstatic cmd", placeholder: ".venv/bin/python manage.py collectstatic --noinput" },
       { key: "seed_command", label: "Seed opcional", placeholder: "npm run seed" },
       { key: "start_command", label: "Start", placeholder: "Auto script start / node dist/app.js", help: "Vacio = usa script start si existe; si no, node dist/app.js." },
       { key: "frontend_install_command", label: "Install frontend", placeholder: "Auto segun lockfile", help: "Vacio = npm/pnpm/yarn detectado automaticamente." },
@@ -677,10 +738,14 @@ function labelKey(key: string) {
     build_command: "Build",
     code: "Tipo",
     command: "Comando",
+    collectstatic: "Collectstatic",
+    collectstatic_command: "Collectstatic",
     database_engine: "DB",
     deploy_command: "Deploy",
+    django_settings_module: "Django settings",
     env_vars: "Env",
     event: "Evento",
+    frontend_package_manager: "Frontend PM",
     frontend_dir: "Frontend",
     header: "Header",
     instance_id: "App ID",
@@ -690,6 +755,7 @@ function labelKey(key: string) {
     port: "Puerto",
     proxy_routes: "Proxy",
     repo_url: "Repo",
+    runtime: "Runtime",
     schedule: "Frecuencia",
     scope: "Scope",
     serve_frontend: "Frontend",

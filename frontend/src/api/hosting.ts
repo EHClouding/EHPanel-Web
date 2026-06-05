@@ -673,6 +673,15 @@ export type AdvancedSummaryResponse = {
   recent_audit: Array<Record<string, unknown>>
 }
 
+export type GitDeployDetection = {
+  confidence: "high" | "low" | string
+  config: Record<string, string>
+  detected_runtime: "django" | "node" | string
+  missing_env_keys: string[]
+  summary: Record<string, string>
+  warnings: string[]
+}
+
 export type HomeDashboardSummary = {
   activeSites: number
   alerts: Array<{ label: string; tone?: "amber" | "emerald" | "red" }>
@@ -2135,6 +2144,12 @@ export const hostingApi = {
 
   createAdvancedItem: (payload: Pick<HostingAdvancedItem, "account" | "kind" | "name" | "config" | "enabled">) =>
     apiFetch<HostingAdvancedItem>("/hosting/advanced-items/", {
+      body: JSON.stringify(payload),
+      method: "POST",
+    }),
+
+  detectGitDeploy: (payload: { account?: string; repo_url: string; branch?: string; auth_token?: string }) =>
+    apiFetch<GitDeployDetection>("/hosting/advanced-items/detect-git/", {
       body: JSON.stringify(payload),
       method: "POST",
     }),

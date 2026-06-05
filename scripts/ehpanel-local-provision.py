@@ -1247,6 +1247,170 @@ def safe_db_slug(*parts, max_len=48):
     return value or f"app_{secrets.token_hex(4)}"
 
 
+def find_first_file(root, filename, max_depth=4):
+    root = Path(root)
+    for candidate in root.rglob(filename):
+        try:
+            relative_depth = len(candidate.relative_to(root).parts)
+        except ValueError:
+            continue
+        if relative_depth <= max_depth:
+            return candidate
+    return None
+
+
+def detect_django_settings_module(backend_dir, project_module=""):
+    manage_py = Path(backend_dir) / "manage.py"
+    if manage_py.exists():
+        match = re.search(
+            r"DJANGO_SETTINGS_MODULE['\"]\s*,\s*['\"]([^'\"]+)['\"]",
+            manage_py.read_text(encoding="utf-8", errors="replace"),
+        )
+        if match:
+            return match.group(1)
+    if project_module:
+        candidate = Path(backend_dir) / project_module / "settings.py"
+        if candidate.exists():
+            return f"{project_module}.settings"
+    settings_file = find_first_file(backend_dir, "settings.py", max_depth=3)
+    if settings_file:
+        relative = settings_file.relative_to(backend_dir).with_suffix("")
+        return ".".join(relative.parts)
+    return ""
+
+
+def python_install_command(backend_dir):
+    backend_dir = Path(backend_dir)
+    if (backend_dir / "requirements.txt").exists():
+        return ".venv/bin/pip install -r requirements.txt"
+    if (backend_dir / "pyproject.toml").exists():
+        return ".venv/bin/pip install ."
+    if (backend_dir / "Pipfile").exists():
+        return ".venv/bin/pip install pipenv && .venv/bin/pipenv install --deploy --system"
+    return ".venv/bin/pip install django gunicorn psycopg[binary] dj-database-url python-dotenv"
+
+
+def deploy_git_django_app(payload, settings, app_dir, backend_dir, frontend_dir, config, env_values, username, domain, instance_id, port):
+    require_binary("python3")
+    venv = backend_dir / ".venv"
+    outputs = []
+    command_env = {"CI": "true", "PATH": "/usr/local/bin:/usr/bin:/bin"}
+    if not (venv / "bin" / "python").exists():
+        result = run_account_shell(username, "python3 -m venv .venv", backend_dir, env=command_env, check=False)
+        outputs.append({"step": "python_venv", "returncode": result["returncode"], "stdout_tail": (result.get("stdout") or "")[-2000:], "stderr_tail": (result.get("stderr") or "")[-2000:]})
+        if result["returncode"] != 0:
+            raise RuntimeError(f"Paso python_venv fallo: {result.get('stderr') or result.get('stdout')}")
+
+    django_settings_module = str(config.get("django_settings_module") or detect_django_settings_module(backend_dir, config.get("project_module") or "")).strip()
+    if not django_settings_module:
+        raise ValueError("No se pudo detectar DJANGO_SETTINGS_MODULE. Indica project_module o django_settings_module.")
+    project_module = django_settings_module.rsplit(".", 1)[0]
+
+    env_values.setdefault("DEBUG", "False")
+    env_values.setdefault("PORT", str(port))
+    env_values.setdefault("ALLOWED_HOSTS", f"{domain},www.{domain},127.0.0.1,localhost")
+    env_values.setdefault("CSRF_TRUSTED_ORIGINS", f"https://{domain},https://www.{domain},http://{domain},http://www.{domain}")
+    env_values.setdefault("DJANGO_SETTINGS_MODULE", django_settings_module)
+    env_values.setdefault("SECRET_KEY", secrets.token_urlsafe(50))
+    env_file = backend_dir / ".env"
+    write_env_file(env_file, env_values, username)
+
+    commands = [
+        ("python_upgrade_pip", backend_dir, ".venv/bin/pip install --upgrade pip wheel"),
+        ("python_install", backend_dir, str(config.get("install_command") or python_install_command(backend_dir)).strip()),
+        ("python_runtime_deps", backend_dir, ".venv/bin/pip install gunicorn psycopg[binary] dj-database-url python-dotenv"),
+        ("django_check", backend_dir, str(config.get("check_command") or ".venv/bin/python manage.py check --deploy").strip()),
+    ]
+    migrate_command = str(config.get("migrate_command") or ".venv/bin/python manage.py migrate --noinput").strip()
+    if migrate_command:
+        commands.append(("migrate", backend_dir, migrate_command))
+    collectstatic_command = str(config.get("collectstatic_command") or ".venv/bin/python manage.py collectstatic --noinput").strip()
+    if truthy(config.get("collectstatic", True)) and collectstatic_command:
+        commands.append(("collectstatic", backend_dir, collectstatic_command))
+
+    frontend_pm = None
+    frontend_public_dir = None
+    frontend_backup_dir = ""
+    if frontend_dir and frontend_dir.exists() and (frontend_dir / "package.json").exists():
+        frontend_pm = detect_package_manager(frontend_dir, config.get("frontend_package_manager") or config.get("package_manager") or "auto")
+        require_binary(frontend_pm)
+        frontend_install = str(config.get("frontend_install_command") or package_install_command(frontend_dir, frontend_pm)).strip()
+        frontend_build = str(config.get("frontend_build_command") or package_script_command(frontend_dir, frontend_pm, "build")).strip()
+        if frontend_install:
+            commands.append(("frontend_install", frontend_dir, frontend_install))
+        if frontend_build:
+            commands.append(("frontend_build", frontend_dir, frontend_build))
+
+    for label, cwd, command in commands:
+        result = run_account_shell(username, command, cwd, env=command_env, check=False)
+        if label == "frontend_build" and result["returncode"] != 0 and needs_node_types_retry(result):
+            fix_result = run_account_shell(username, transient_node_types_command(frontend_pm or "npm"), cwd, env=command_env, check=False)
+            outputs.append({"step": f"{label}_install_node_types", "returncode": fix_result["returncode"], "stdout_tail": (fix_result.get("stdout") or "")[-2000:], "stderr_tail": (fix_result.get("stderr") or "")[-2000:]})
+            if fix_result["returncode"] == 0:
+                result = run_account_shell(username, command, cwd, env=command_env, check=False)
+        outputs.append({"step": label, "returncode": result["returncode"], "stdout_tail": (result.get("stdout") or "")[-2000:], "stderr_tail": (result.get("stderr") or "")[-2000:]})
+        if result["returncode"] != 0:
+            raise RuntimeError(f"Paso {label} fallo: {result.get('stderr') or result.get('stdout')}")
+
+    if frontend_dir and truthy(config.get("serve_frontend", True)):
+        dist_dir = frontend_dir / str(config.get("frontend_dist") or "dist").strip().strip("/")
+        public_dir = account_document_root(username, settings, config.get("document_root") or "public_html")
+        frontend_copy = copy_frontend_dist(dist_dir, public_dir, username)
+        frontend_public_dir = frontend_copy["public_dir"]
+        frontend_backup_dir = frontend_copy["backup_dir"]
+
+    start_command = str(config.get("start_command") or f".venv/bin/gunicorn {project_module}.wsgi:application --bind 127.0.0.1:{port} --workers {int(config.get('workers') or 2)}").strip()
+    start_script = app_dir / ".ehpanel-start-git.sh"
+    start_script.write_text(
+        "#!/bin/sh\n"
+        f"set -a\n. {shell_quote(str(env_file))}\nset +a\n"
+        f"cd {shell_quote(str(backend_dir))}\n"
+        f"exec /bin/sh -lc {shell_quote(start_command)}\n",
+        encoding="utf-8",
+    )
+    start_script.chmod(0o755)
+    chown_account(username, app_dir)
+    service = write_systemd_app_service(username, instance_id, backend_dir, start_script, f"EHPanel Git Django app {instance_id}")
+
+    if truthy(config.get("proxy_root")) or not frontend_public_dir:
+        proxy_path = write_app_proxy(domain, instance_id, port, settings)
+        published_path = f"/__apps/{instance_id}/"
+    else:
+        routes = [route.strip() for route in str(config.get("proxy_routes") or "/api/,/admin/,/static/,/media/").split(",") if route.strip()]
+        proxy_path = write_path_proxy(domain, instance_id, port, settings, routes)
+        published_path = "/"
+
+    health_path = str(config.get("health_path") or "").strip()
+    if health_path and not health_path.startswith("/"):
+        health_path = f"/{health_path}"
+    health_status = ""
+    if health_path:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{health_path}", timeout=10) as response:
+                health_status = str(response.status)
+        except Exception as exc:
+            health_status = f"failed: {exc}"
+    commit = command_stdout(["git", "rev-parse", "--short", "HEAD"], cwd=str(app_dir))
+    return ok(
+        app_id=payload.get("app_id"),
+        item_id=payload.get("item_id"),
+        runtime="git_django",
+        url=public_url(payload, domain, published_path),
+        install_path=str(app_dir),
+        backend_dir=str(backend_dir),
+        frontend_public_dir=frontend_public_dir or "",
+        frontend_backup_dir=frontend_backup_dir,
+        service=service,
+        proxy=str(proxy_path),
+        repo_url=redact_git_url(config.get("repo_url") or ""),
+        branch=config.get("branch") or "main",
+        git_commit=commit,
+        health_status=health_status,
+        django_settings_module=django_settings_module,
+        outputs=outputs,
+    )
+
+
 def require_binary(binary):
     if not shutil.which(binary):
         raise ValueError(f"No se encontro el binario requerido: {binary}")
@@ -1690,7 +1854,6 @@ def deploy_git_app(payload, settings):
     app_dir.parent.mkdir(parents=True, exist_ok=True)
     chown_account(username, app_dir)
     require_binary("git")
-    require_binary("node")
 
     git_env, temp_dir = git_authenticated_env(username, config.get("auth_token") or config.get("pat") or config.get("token"))
     try:
@@ -1712,6 +1875,40 @@ def deploy_git_app(payload, settings):
         if target and os.path.commonpath([str(app_dir), str(target)]) != str(app_dir):
             raise ValueError("Directorio de aplicacion fuera del repositorio.")
 
+    requested_runtime = str(config.get("runtime") or config.get("detected_runtime") or "").strip().lower()
+    is_django = requested_runtime in {"django", "git_django", "django_frontend"} or (backend_dir / "manage.py").exists()
+    if is_django:
+        env_values = parse_env_lines(config.get("env_vars") or "")
+        if config.get("database_url"):
+            env_values.setdefault("DATABASE_URL", str(config.get("database_url")))
+        elif config.get("db_name") and config.get("db_user") and config.get("db_password"):
+            engine = str(config.get("database_engine") or "postgresql").lower()
+            create_database({"engine": engine, "database": config["db_name"], "user": config["db_user"], "password": config["db_password"]}, emit=False)
+            db_port = "5432" if engine == "postgresql" else "3306"
+            scheme = "postgresql" if engine == "postgresql" else "mysql"
+            env_values.setdefault("DATABASE_URL", f"{scheme}://{config['db_user']}:{config['db_password']}@localhost:{db_port}/{config['db_name']}")
+            env_values.setdefault("DB_NAME", str(config["db_name"]))
+            env_values.setdefault("DB_USER", str(config["db_user"]))
+            env_values.setdefault("DB_PASSWORD", str(config["db_password"]))
+            env_values.setdefault("DB_HOST", "localhost")
+            env_values.setdefault("DB_PORT", db_port)
+        elif config.get("database_engine"):
+            engine = str(config.get("database_engine") or "postgresql").lower()
+            db_name = safe_db_slug(username, instance_id, "db")
+            db_user = safe_db_slug(username, instance_id, "user")
+            db_password = secrets.token_urlsafe(32)
+            create_database({"engine": engine, "database": db_name, "user": db_user, "password": db_password}, emit=False)
+            db_port = "5432" if engine == "postgresql" else "3306"
+            scheme = "postgresql" if engine == "postgresql" else "mysql"
+            env_values.setdefault("DATABASE_URL", f"{scheme}://{db_user}:{db_password}@localhost:{db_port}/{db_name}")
+            env_values.setdefault("DB_NAME", db_name)
+            env_values.setdefault("DB_USER", db_user)
+            env_values.setdefault("DB_PASSWORD", db_password)
+            env_values.setdefault("DB_HOST", "localhost")
+            env_values.setdefault("DB_PORT", db_port)
+        return deploy_git_django_app(payload, settings, app_dir, backend_dir, frontend_dir, config, env_values, username, domain, instance_id, port)
+
+    require_binary("node")
     package_manager = detect_package_manager(backend_dir, config.get("package_manager") or "auto")
     require_binary(package_manager)
     env_values = parse_env_lines(config.get("env_vars") or "")

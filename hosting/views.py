@@ -10,6 +10,9 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from urllib import request as urllib_request
 from urllib import parse as urllib_parse
@@ -2770,6 +2773,221 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
         item.secret_config = encrypted
         item.save(update_fields=["secret_config", "updated_at"])
 
+    @staticmethod
+    def _safe_git_repo_url(repo_url):
+        repo_url = str(repo_url or "").strip()
+        if not repo_url.startswith(("https://", "git@", "ssh://")):
+            raise ValidationError({"repo_url": "El repositorio Git debe usar HTTPS o SSH."})
+        if repo_url.startswith("https://") and "@" in repo_url:
+            raise ValidationError({"repo_url": "No coloques credenciales dentro de la URL. Usa el campo Token PAT."})
+        return repo_url
+
+    @staticmethod
+    def _relative_repo_path(root, path):
+        path = Path(path)
+        try:
+            value = path.relative_to(root).as_posix()
+        except ValueError:
+            return ""
+        return "" if value == "." else value
+
+    @staticmethod
+    def _read_json_file(path):
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    @staticmethod
+    def _detect_package_manager_from_path(path):
+        path = Path(path)
+        if (path / "pnpm-lock.yaml").exists():
+            return "pnpm"
+        if (path / "yarn.lock").exists():
+            return "yarn"
+        return "npm"
+
+    @staticmethod
+    def _detect_django_settings_from_manage(backend_dir):
+        manage_py = Path(backend_dir) / "manage.py"
+        if manage_py.exists():
+            text = manage_py.read_text(encoding="utf-8", errors="replace")
+            match = re.search(r"DJANGO_SETTINGS_MODULE['\"]\s*,\s*['\"]([^'\"]+)['\"]", text)
+            if match:
+                return match.group(1)
+        for settings_file in Path(backend_dir).rglob("settings.py"):
+            parts = settings_file.relative_to(backend_dir).with_suffix("").parts
+            if len(parts) <= 3:
+                return ".".join(parts)
+        return ""
+
+    @staticmethod
+    def _guess_env_keys(root):
+        candidates = [".env.example", ".env.sample", "env.example", "example.env"]
+        keys = []
+        for candidate in candidates:
+            env_file = Path(root) / candidate
+            if not env_file.exists():
+                continue
+            for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key = line.split("=", 1)[0].strip()
+                if re.match(r"^[A-Z][A-Z0-9_]{1,80}$", key):
+                    keys.append(key)
+            break
+        generated = {"DATABASE_URL", "SECRET_KEY", "JWT_SECRET", "JWT_REFRESH_SECRET", "PORT", "NODE_ENV", "DEBUG", "ALLOWED_HOSTS", "CSRF_TRUSTED_ORIGINS"}
+        return sorted({key for key in keys if key not in generated})
+
+    @staticmethod
+    def _inspect_git_checkout(root, account=None, repo_url="", branch="main"):
+        root = Path(root)
+        warnings = []
+        package_files = [path for path in root.rglob("package.json") if "node_modules" not in path.parts and ".venv" not in path.parts]
+        manage_files = [path for path in root.rglob("manage.py") if ".venv" not in path.parts and "node_modules" not in path.parts]
+        backend_dir = root
+        frontend_dir = None
+        runtime = "node"
+        django_settings_module = ""
+        project_module = ""
+
+        if manage_files:
+            manage_py = sorted(manage_files, key=lambda item: len(item.relative_to(root).parts))[0]
+            backend_dir = manage_py.parent
+            runtime = "django"
+            django_settings_module = HostingAdvancedItemViewSet._detect_django_settings_from_manage(backend_dir)
+            project_module = django_settings_module.rsplit(".", 1)[0] if django_settings_module else ""
+
+        frontend_candidates = []
+        for package_file in package_files:
+            package_dir = package_file.parent
+            if runtime == "django" and package_dir == backend_dir:
+                continue
+            package = HostingAdvancedItemViewSet._read_json_file(package_file)
+            deps = {**(package.get("dependencies") or {}), **(package.get("devDependencies") or {})}
+            scripts = package.get("scripts") or {}
+            score = 0
+            if any(dep in deps for dep in ["vite", "@vitejs/plugin-react", "@vitejs/plugin-vue", "react", "vue"]):
+                score += 5
+            if "build" in scripts:
+                score += 2
+            if (package_dir / "vite.config.ts").exists() or (package_dir / "vite.config.js").exists():
+                score += 2
+            if score:
+                frontend_candidates.append((score, package_dir, package, deps))
+        if frontend_candidates:
+            frontend_candidates.sort(key=lambda item: (-item[0], len(item[1].relative_to(root).parts)))
+            frontend_dir = frontend_candidates[0][1]
+
+        if runtime == "node" and package_files:
+            backend_dir = sorted(package_files, key=lambda item: len(item.relative_to(root).parts))[0].parent
+
+        backend_rel = HostingAdvancedItemViewSet._relative_repo_path(root, backend_dir)
+        frontend_rel = HostingAdvancedItemViewSet._relative_repo_path(root, frontend_dir) if frontend_dir else ""
+        package_manager = HostingAdvancedItemViewSet._detect_package_manager_from_path(backend_dir)
+        frontend_pm = HostingAdvancedItemViewSet._detect_package_manager_from_path(frontend_dir) if frontend_dir else package_manager
+        repo_name = Path(str(repo_url).rstrip("/").replace(".git", "")).name or "app"
+        instance_id = re.sub(r"[^A-Za-z0-9_.-]", "-", repo_name.lower()).strip("-") or "git-app"
+        port = 3001
+        if account:
+            port = 18000 + secrets.randbelow(20000)
+
+        config = {
+            "auto_deploy": "true",
+            "runtime": runtime,
+            "repo_url": repo_url,
+            "branch": branch or "main",
+            "working_dir": f"apps/{instance_id}",
+            "instance_id": instance_id,
+            "port": str(port),
+            "backend_dir": backend_rel,
+            "frontend_dir": frontend_rel,
+            "package_manager": package_manager,
+            "frontend_package_manager": frontend_pm,
+            "database_engine": "postgresql",
+            "serve_frontend": "true" if frontend_rel else "false",
+            "frontend_dist": "dist",
+            "health_path": "/health" if runtime == "node" else "",
+        }
+        if runtime == "django":
+            config.update({
+                "django_settings_module": django_settings_module,
+                "project_module": project_module,
+                "proxy_routes": "/api/,/admin/,/static/,/media/" if frontend_rel else "",
+                "collectstatic": "true",
+            })
+            if not django_settings_module:
+                warnings.append("No se pudo detectar DJANGO_SETTINGS_MODULE; el cliente debera indicarlo.")
+        else:
+            config["proxy_routes"] = "/api/,/storage/"
+        if not package_files and runtime != "django":
+            warnings.append("No se encontro package.json; se requeriran comandos manuales.")
+        if runtime == "django" and not ((backend_dir / "requirements.txt").exists() or (backend_dir / "pyproject.toml").exists()):
+            warnings.append("No se encontro requirements.txt ni pyproject.toml; se usara instalacion Python generica.")
+        missing_env = HostingAdvancedItemViewSet._guess_env_keys(root)
+        if missing_env:
+            warnings.append("Variables sugeridas desde .env.example: " + ", ".join(missing_env[:12]))
+        return {
+            "detected_runtime": runtime,
+            "confidence": "high" if runtime == "django" or package_files else "low",
+            "config": config,
+            "missing_env_keys": missing_env,
+            "warnings": warnings,
+            "summary": {
+                "backend_dir": backend_rel or ".",
+                "frontend_dir": frontend_rel or "",
+                "django_settings_module": django_settings_module,
+                "package_manager": package_manager,
+                "frontend_package_manager": frontend_pm,
+            },
+        }
+
+    @action(detail=False, methods=["post"], url_path="detect-git")
+    def detect_git(self, request):
+        account_id = request.data.get("account")
+        account = None
+        if account_id:
+            account = scoped_accounts(HostingAccount.objects.all(), request.user).filter(id=account_id).first()
+            if not account:
+                raise ValidationError({"account": "Cuenta no disponible."})
+        repo_url = self._safe_git_repo_url(request.data.get("repo_url"))
+        branch = str(request.data.get("branch") or "main").strip() or "main"
+        token = str(request.data.get("auth_token") or request.data.get("pat") or request.data.get("token") or "").strip()
+        temp_dir = tempfile.mkdtemp(prefix="ehpanel-git-detect-")
+        askpass = None
+        try:
+            env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+            if token:
+                askpass = Path(temp_dir) / "askpass.sh"
+                escaped_token = token.replace("'", "'\"'\"'")
+                askpass.write_text(
+                    "#!/bin/sh\n"
+                    "case \"$1\" in\n"
+                    "*Username*) printf '%s\\n' 'x-access-token' ;;\n"
+                    f"*) printf '%s\\n' '{escaped_token}' ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
+                askpass.chmod(0o700)
+                env["GIT_ASKPASS"] = str(askpass)
+            checkout = Path(temp_dir) / "repo"
+            result = subprocess.run(
+                ["git", "clone", "--depth", "1", "--branch", branch, "--single-branch", repo_url, str(checkout)],
+                text=True,
+                capture_output=True,
+                timeout=90,
+                env=env,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "No se pudo clonar el repositorio.").replace(token, "********")
+                return Response({"detail": detail[-2000:]}, status=status.HTTP_400_BAD_REQUEST)
+            detected = self._inspect_git_checkout(checkout, account=account, repo_url=repo_url, branch=branch)
+            return Response(detected)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def _queue_apply(self, item, *, delete=False, transient_config=None):
         from .local_provisioning import dispatch_or_execute_local
 
@@ -2786,10 +3004,12 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
                 raise ValidationError({"account": "La cuenta no tiene un dominio activo para publicar el deploy."})
             if domain:
                 instance_id = runtime_config.get("instance_id") or f"git-{item.id}"
+                detected_runtime = str(runtime_config.get("runtime") or runtime_config.get("detected_runtime") or "node").lower()
+                app_type = HostingApplication.AppType.DJANGO if detected_runtime in {"django", "git_django", "django_frontend"} else HostingApplication.AppType.NODEJS
                 app_metadata = {
                     "instance_id": instance_id,
                     "port": int(runtime_config.get("port") or 3001),
-                    "runtime": "git_node",
+                    "runtime": "git_django" if app_type == HostingApplication.AppType.DJANGO else "git_node",
                     "git": {
                         "repo_url": runtime_config.get("repo_url", ""),
                         "branch": runtime_config.get("branch", "main"),
@@ -2800,14 +3020,14 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
                 app_defaults = {
                     "account": item.account,
                     "domain": domain,
-                    "app_type": HostingApplication.AppType.NODEJS,
+                    "app_type": app_type,
                     "name": item.name,
                     "install_path": runtime_config.get("working_dir") or f"/home/{item.account.username}/apps/{instance_id}",
                     "url": f"https://{domain.domain}/",
                     "status": HostingApplication.Status.INSTALLING,
                     "metadata": app_metadata,
                 }
-                app = HostingApplication.objects.filter(domain=domain, app_type=HostingApplication.AppType.NODEJS, metadata__advanced_item_id=item.id).first()
+                app = HostingApplication.objects.filter(domain=domain, metadata__advanced_item_id=item.id).first()
                 if app:
                     for field, value in app_defaults.items():
                         setattr(app, field, value)
