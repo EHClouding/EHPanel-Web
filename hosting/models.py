@@ -1057,6 +1057,7 @@ class HostingAdvancedItem(models.Model):
     kind = models.CharField(max_length=30, choices=Kind.choices)
     name = models.CharField(max_length=160)
     config = models.JSONField(default=dict, blank=True)
+    secret_config = models.JSONField(default=dict, blank=True)
     enabled = models.BooleanField(default=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     last_job = models.ForeignKey(AgentJob, null=True, blank=True, on_delete=models.SET_NULL)

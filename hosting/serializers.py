@@ -673,11 +673,16 @@ class HostingAdvancedItemSerializer(serializers.ModelSerializer):
             self.fields["account"].queryset = scoped_accounts(HostingAccount.objects.all(), request.user)
 
     def get_masked_config(self, obj):
-        sensitive_keys = {"secret", "token", "password", "private_key", "webhook_secret", "value"}
+        sensitive_parts = ("secret", "token", "password", "private_key", "auth_secret", "database_url")
         data = obj.config if isinstance(obj.config, dict) else {}
         masked = {}
         for key, value in data.items():
-            masked[key] = "********" if key in sensitive_keys and value else value
+            normalized = str(key).lower()
+            masked[key] = "********" if any(part in normalized for part in sensitive_parts) and value else value
+        secret_config = obj.secret_config if isinstance(getattr(obj, "secret_config", {}), dict) else {}
+        for key, value in secret_config.items():
+            if value:
+                masked[f"{key}_configured"] = True
         return masked
 
     def to_representation(self, instance):
@@ -701,8 +706,25 @@ class HostingAdvancedItemSerializer(serializers.ModelSerializer):
         config = attrs.get("config", getattr(self.instance, "config", {}) or {})
         if kind == HostingAdvancedItem.Kind.VARIABLE and not config.get("key"):
             raise serializers.ValidationError({"config": "La variable requiere una clave."})
-        if kind == HostingAdvancedItem.Kind.GIT_REPO and not config.get("repo_url"):
-            raise serializers.ValidationError({"config": "El repositorio Git requiere una URL."})
+        if kind == HostingAdvancedItem.Kind.GIT_REPO:
+            repo_url = str(config.get("repo_url") or "").strip()
+            if not repo_url:
+                raise serializers.ValidationError({"config": "El repositorio Git requiere una URL."})
+            if not repo_url.startswith(("https://", "git@", "ssh://")):
+                raise serializers.ValidationError({"config": "El repositorio Git debe usar HTTPS o SSH."})
+            if "@" in repo_url and repo_url.startswith("https://"):
+                raise serializers.ValidationError({"config": "No coloques credenciales dentro de la URL. Usa el campo Token PAT."})
+            branch = str(config.get("branch") or "main").strip()
+            if branch and not re.match(r"^[A-Za-z0-9._/-]{1,120}$", branch):
+                raise serializers.ValidationError({"config": "Branch Git invalido."})
+            port = config.get("port")
+            if port not in [None, ""]:
+                try:
+                    port_value = int(port)
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({"config": "El puerto interno debe ser numerico."})
+                if port_value < 1024 or port_value > 65535:
+                    raise serializers.ValidationError({"config": "El puerto interno debe estar entre 1024 y 65535."})
         if kind == HostingAdvancedItem.Kind.WEBHOOK and not config.get("url"):
             raise serializers.ValidationError({"config": "El webhook requiere una URL."})
         return attrs

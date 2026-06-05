@@ -821,6 +821,21 @@ def encrypt_migration_secret(secret):
     return credential_fernet().encrypt(secret.encode()).decode()
 
 
+def encrypt_hosting_secret(secret):
+    if not secret:
+        return ""
+    return credential_fernet().encrypt(str(secret).encode()).decode()
+
+
+def decrypt_hosting_secret(secret):
+    if not secret:
+        return ""
+    try:
+        return credential_fernet().decrypt(str(secret).encode()).decode()
+    except (InvalidToken, UnicodeDecodeError):
+        return ""
+
+
 def decrypt_migration_secret(source):
     if not source.encrypted_secret:
         return ""
@@ -3674,7 +3689,7 @@ def sync_job_side_effects(job):
             performance.save(update_fields=["job", "status", "result", "error_code", "error_detail", "finished_at", "updated_at"])
         return
 
-    if job.job_type == AgentJob.Type.SERVICE_ACTION and (job.payload or {}).get("action") == "apply_advanced_item":
+    if job.job_type in [AgentJob.Type.SERVICE_ACTION, AgentJob.Type.DEPLOY_GIT_APP] and (job.payload or {}).get("action") == "apply_advanced_item":
         item_id = (job.payload or {}).get("item_id")
         item = HostingAdvancedItem.objects.filter(id=item_id).first()
         if item:
@@ -3684,7 +3699,8 @@ def sync_job_side_effects(job):
             elif job.status == AgentJob.Status.FAILED:
                 item.status = HostingAdvancedItem.Status.FAILED
             item.save(update_fields=["status", "last_job", "updated_at"])
-        return
+        if job.job_type == AgentJob.Type.SERVICE_ACTION:
+            return
 
     scan_id = (job.payload or {}).get("scan_id")
     if scan_id and job.job_type == AgentJob.Type.SECURITY_SCAN:
@@ -3732,6 +3748,12 @@ def sync_job_side_effects(job):
                 app.status = HostingApplication.Status.FAILED
                 app.metadata = {**(app.metadata or {}), "error_code": job.error_code, "error_detail": job.error_detail}
                 app.save(update_fields=["status", "metadata", "updated_at"])
+
+    if job.job_type == AgentJob.Type.DEPLOY_GIT_APP:
+        redacted_payload = AgentJob.redacted_payload(job.payload or {})
+        if redacted_payload != (job.payload or {}):
+            job.payload = redacted_payload
+            job.save(update_fields=["payload", "updated_at"])
 
     backup_id = (job.payload or {}).get("backup_id")
     if backup_id and job.job_type == AgentJob.Type.BACKUP_APP:

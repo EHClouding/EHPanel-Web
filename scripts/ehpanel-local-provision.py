@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import zipfile
 from pathlib import Path
 
@@ -49,6 +49,16 @@ def run(args, input_text=None, check=True, cwd=None, env=None):
     if check and completed.returncode != 0:
         raise RuntimeError(f"{' '.join(args)} failed: {completed.stderr or completed.stdout}")
     return {"command": args, "returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
+
+
+def shell_quote(value):
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
+def truthy(value):
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
 
 
 def file_tail(path, max_chars=4000):
@@ -253,8 +263,6 @@ def write_dovecot_passwd_entry(email, password, home, settings=None, quota_mb=No
     update_dovecot_passwd_file(email, passwd_file, line)
     reload_dovecot()
     return True
-
-
 
 
 def update_dovecot_passwd_quota(email, quota_mb, settings=None):
@@ -1095,8 +1103,11 @@ def safe_app_dir(payload, settings):
     username = payload["username"]
     validate_username(username)
     home = (Path(settings["home_root"]) / username).resolve(strict=False)
-    working_dir = str(payload.get("working_dir") or f"apps/{payload.get('instance_id') or payload.get('name') or 'app'}").strip().strip("/").replace("\\", "/")
-    target = (home / working_dir).resolve(strict=False)
+    raw_working_dir = str(payload.get("working_dir") or f"apps/{payload.get('instance_id') or payload.get('name') or 'app'}").strip().replace("\\", "/")
+    if raw_working_dir.startswith("/"):
+        target = Path(raw_working_dir).resolve(strict=False)
+    else:
+        target = (home / raw_working_dir.strip("/")).resolve(strict=False)
     if os.path.commonpath([str(home), str(target)]) != str(home):
         raise ValueError("Ruta de aplicacion fuera de la cuenta.")
     target.mkdir(parents=True, exist_ok=True)
@@ -1139,6 +1150,182 @@ def write_app_proxy(domain, instance_id, port, settings):
     run(["nginx", "-t"])
     run(["systemctl", "reload", "nginx"], check=False)
     return conf
+
+
+def write_path_proxy(domain, instance_id, port, settings, routes=None):
+    domain = validate_domain(domain)
+    instance_id = validate_instance_id(instance_id)
+    port = int(port)
+    routes = routes or ["/api/", "/storage/"]
+    apps_dir = Path("/etc/nginx/ehpanel-apps")
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    conf = apps_dir / f"{safe_vhost_name(domain)}-{safe_vhost_name(instance_id)}-routes.conf"
+    snippets = []
+    for route in routes:
+        route = "/" + str(route or "").strip().strip("/") + "/"
+        if not re.match(r"^/[A-Za-z0-9_.~/-]+/$", route):
+            raise ValueError(f"Ruta proxy invalida: {route}")
+        snippets.append(
+            f"""location ^~ {route} {{
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_pass http://127.0.0.1:{port}{route};
+}}
+"""
+        )
+    conf.write_text("\n".join(snippets), encoding="utf-8")
+    ensure_nginx_app_include(domain, settings)
+    run(["nginx", "-t"])
+    run(["systemctl", "reload", "nginx"], check=False)
+    return conf
+
+
+def detect_package_manager(path, requested="auto"):
+    requested = str(requested or "auto").strip().lower()
+    if requested in {"npm", "pnpm", "yarn"}:
+        return requested
+    path = Path(path)
+    if (path / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (path / "yarn.lock").exists():
+        return "yarn"
+    return "npm"
+
+
+def package_install_command(path, package_manager):
+    if not (Path(path) / "package.json").exists():
+        return ""
+    package_manager = detect_package_manager(path, package_manager)
+    if package_manager == "pnpm":
+        return "pnpm install --frozen-lockfile"
+    if package_manager == "yarn":
+        return "yarn install --frozen-lockfile"
+    return "npm ci" if (Path(path) / "package-lock.json").exists() else "npm install"
+
+
+def package_json_scripts(path):
+    package_json = Path(path) / "package.json"
+    if not package_json.exists():
+        return {}
+    try:
+        data = json.loads(package_json.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    scripts = data.get("scripts") if isinstance(data, dict) else {}
+    return scripts if isinstance(scripts, dict) else {}
+
+
+def package_script_command(path, package_manager, script):
+    if script not in package_json_scripts(path):
+        return ""
+    runner = detect_package_manager(path, package_manager)
+    if runner == "yarn":
+        return f"yarn {script}"
+    return f"{runner} run {script}"
+
+
+def require_binary(binary):
+    if not shutil.which(binary):
+        raise ValueError(f"No se encontro el binario requerido: {binary}")
+
+
+def run_account_shell(username, command, cwd, env=None, check=True):
+    validate_username(username)
+    env_parts = [f"{key}={value}" for key, value in (env or {}).items() if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key)]
+    args = ["sudo", "-u", username, "env", *env_parts, "/bin/sh", "-lc", command]
+    return run(args, cwd=str(cwd), check=check)
+
+
+def parse_env_lines(raw):
+    values = {}
+    for line in str(raw or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if SAFE_ENV_KEY.match(key):
+            values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
+def write_env_file(path, values, username):
+    lines = []
+    for key, value in values.items():
+        if not SAFE_ENV_KEY.match(key):
+            raise ValueError(f"Variable invalida: {key}")
+        escaped = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        lines.append(f'{key}="{escaped}"')
+    atomic_write_text(Path(path), "\n".join(lines) + "\n", 0o600, f"{username}:{username}")
+    return path
+
+
+def git_authenticated_env(username, token):
+    token = str(token or "").strip()
+    if not token:
+        return {}, None
+    temp_dir = Path("/tmp") / f"ehpanel-git-{secrets.token_hex(8)}"
+    temp_dir.mkdir(mode=0o700)
+    askpass = temp_dir / "askpass.sh"
+    askpass.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "*Username*) printf '%s\\n' 'x-access-token' ;;\n"
+        f"*) printf '%s\\n' {shell_quote(token)} ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    askpass.chmod(0o700)
+    return {"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0"}, temp_dir
+
+
+def redact_git_url(url):
+    parsed = urlparse(str(url or ""))
+    if parsed.username or parsed.password:
+        netloc = parsed.hostname or ""
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return str(url or "")
+
+
+def copy_frontend_dist(source, public_dir, username):
+    source = Path(source)
+    public_dir = Path(public_dir)
+    if not source.exists():
+        raise ValueError(f"No existe el directorio build frontend: {source}")
+    public_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir = None
+    existing_items = [item for item in public_dir.iterdir() if item.name not in {".well-known"}]
+    if existing_items:
+        backup_dir = public_dir.parent / ".ehpanel" / "backups" / f"{public_dir.name}-{int(time.time())}"
+        backup_dir.parent.mkdir(parents=True, exist_ok=True)
+        backup_dir.mkdir()
+        for item in existing_items:
+            target = backup_dir / item.name
+            if item.is_dir():
+                shutil.copytree(item, target)
+            else:
+                shutil.copy2(item, target)
+    for item in public_dir.iterdir():
+        if item.name in {".well-known"}:
+            continue
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+    for item in source.iterdir():
+        target = public_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+    chown_account(username, public_dir)
+    if backup_dir:
+        chown_account(username, backup_dir.parent)
+    return {"public_dir": str(public_dir), "backup_dir": str(backup_dir or "")}
 
 
 def public_url(payload, domain, path=""):
@@ -1458,6 +1645,166 @@ http.createServer((req, res) => {{
     service = write_systemd_app_service(username, instance_id, app_dir, start_script, f"EHPanel Node app {instance_id}")
     proxy = write_app_proxy(domain, instance_id, port, settings)
     return ok(app_id=payload.get("app_id"), url=public_url(payload, domain, f"/__apps/{instance_id}/"), install_path=str(app_dir), service=service, proxy=str(proxy), node_version=command_stdout([node_bin, "--version"]))
+
+
+def deploy_git_app(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    domain = validate_domain(payload["domain"])
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    instance_id = validate_instance_id(config.get("instance_id") or payload.get("instance_id") or f"git-{payload.get('item_id') or payload.get('app_id')}")
+    repo_url = str(config.get("repo_url") or "").strip()
+    if not re.match(r"^(https://|git@|ssh://)", repo_url):
+        raise ValueError("URL de repositorio Git invalida.")
+    parsed_repo = urlparse(repo_url)
+    if parsed_repo.scheme == "https" and (parsed_repo.username or parsed_repo.password):
+        raise ValueError("No coloques credenciales en la URL del repositorio. Usa el campo Token PAT.")
+    branch = str(config.get("branch") or "main").strip() or "main"
+    port = int(config.get("port") or payload.get("port") or 3001)
+    if port < 1024 or port > 65535:
+        raise ValueError("Puerto interno invalido.")
+    home, app_dir = safe_app_dir({**payload, "instance_id": instance_id, "working_dir": config.get("working_dir") or f"apps/{instance_id}"}, settings)
+    app_dir.parent.mkdir(parents=True, exist_ok=True)
+    chown_account(username, app_dir)
+    require_binary("git")
+    require_binary("node")
+
+    git_env, temp_dir = git_authenticated_env(username, config.get("auth_token") or config.get("pat") or config.get("token"))
+    try:
+        if (app_dir / ".git").exists():
+            run_account_shell(username, f"git fetch origin {shell_quote(branch)} && git checkout -B {shell_quote(branch)} origin/{shell_quote(branch)} && git pull --ff-only origin {shell_quote(branch)}", app_dir, env=git_env)
+        else:
+            if any(app_dir.iterdir()):
+                raise ValueError(f"La ruta {app_dir} no esta vacia y no es un repositorio Git.")
+            run_account_shell(username, f"git clone --branch {shell_quote(branch)} --single-branch {shell_quote(repo_url)} .", app_dir, env=git_env)
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    backend_dir_value = str(config.get("backend_dir") or "").strip().strip("/")
+    frontend_dir_value = str(config.get("frontend_dir") or "").strip().strip("/")
+    backend_dir = (app_dir / backend_dir_value).resolve(strict=False) if backend_dir_value else app_dir
+    frontend_dir = (app_dir / frontend_dir_value).resolve(strict=False) if frontend_dir_value else None
+    for target in [backend_dir, frontend_dir] if frontend_dir else [backend_dir]:
+        if target and os.path.commonpath([str(app_dir), str(target)]) != str(app_dir):
+            raise ValueError("Directorio de aplicacion fuera del repositorio.")
+
+    package_manager = detect_package_manager(backend_dir, config.get("package_manager") or "auto")
+    require_binary(package_manager)
+    env_values = parse_env_lines(config.get("env_vars") or "")
+    env_values.setdefault("NODE_ENV", "production")
+    env_values.setdefault("PORT", str(port))
+    upload_dir = config.get("upload_dir") or str(app_dir / "storage")
+    env_values.setdefault("UPLOAD_DIR", str(upload_dir))
+    if config.get("database_url"):
+        env_values.setdefault("DATABASE_URL", str(config.get("database_url")))
+    elif config.get("db_name") and config.get("db_user") and config.get("db_password"):
+        engine = str(config.get("database_engine") or "postgresql").lower()
+        create_database({"engine": engine, "database": config["db_name"], "user": config["db_user"], "password": config["db_password"]}, emit=False)
+        scheme = "postgresql" if engine == "postgresql" else "mysql"
+        env_values.setdefault("DATABASE_URL", f"{scheme}://{config['db_user']}:{config['db_password']}@localhost:5432/{config['db_name']}" if engine == "postgresql" else f"{scheme}://{config['db_user']}:{config['db_password']}@localhost:3306/{config['db_name']}")
+    if not env_values.get("JWT_SECRET"):
+        env_values["JWT_SECRET"] = secrets.token_urlsafe(48)
+    if not env_values.get("JWT_REFRESH_SECRET"):
+        env_values["JWT_REFRESH_SECRET"] = secrets.token_urlsafe(48)
+
+    Path(upload_dir).mkdir(parents=True, exist_ok=True)
+    chown_account(username, upload_dir)
+    env_file = backend_dir / ".env"
+    write_env_file(env_file, env_values, username)
+
+    commands = []
+    install_command = str(config.get("install_command") or package_install_command(backend_dir, package_manager)).strip()
+    if install_command:
+        commands.append(("install", backend_dir, install_command))
+    build_command = str(config.get("build_command") or package_script_command(backend_dir, package_manager, "build")).strip()
+    if build_command:
+        commands.append(("build", backend_dir, build_command))
+    migrate_command = str(config.get("migrate_command") or "").strip()
+    if migrate_command:
+        commands.append(("migrate", backend_dir, migrate_command))
+    seed_command = str(config.get("seed_command") or "").strip()
+    if seed_command:
+        commands.append(("seed", backend_dir, seed_command))
+
+    frontend_public_dir = None
+    frontend_backup_dir = ""
+    if frontend_dir and frontend_dir.exists() and (frontend_dir / "package.json").exists():
+        frontend_pm = detect_package_manager(frontend_dir, config.get("frontend_package_manager") or config.get("package_manager") or "auto")
+        require_binary(frontend_pm)
+        frontend_install = str(config.get("frontend_install_command") or package_install_command(frontend_dir, frontend_pm)).strip()
+        frontend_build = str(config.get("frontend_build_command") or package_script_command(frontend_dir, frontend_pm, "build")).strip()
+        if frontend_install:
+            commands.append(("frontend_install", frontend_dir, frontend_install))
+        if frontend_build:
+            commands.append(("frontend_build", frontend_dir, frontend_build))
+
+    outputs = []
+    command_env = {"CI": "true", "PATH": "/usr/local/bin:/usr/bin:/bin"}
+    for label, cwd, command in commands:
+        result = run_account_shell(username, command, cwd, env=command_env, check=False)
+        outputs.append({"step": label, "returncode": result["returncode"], "stdout_tail": (result.get("stdout") or "")[-2000:], "stderr_tail": (result.get("stderr") or "")[-2000:]})
+        if result["returncode"] != 0:
+            raise RuntimeError(f"Paso {label} fallo: {result.get('stderr') or result.get('stdout')}")
+
+    if frontend_dir and truthy(config.get("serve_frontend", True)):
+        dist_dir = frontend_dir / str(config.get("frontend_dist") or "dist").strip().strip("/")
+        public_dir = account_document_root(username, settings, config.get("document_root") or "public_html")
+        frontend_copy = copy_frontend_dist(dist_dir, public_dir, username)
+        frontend_public_dir = frontend_copy["public_dir"]
+        frontend_backup_dir = frontend_copy["backup_dir"]
+
+    start_command = str(config.get("start_command") or package_script_command(backend_dir, package_manager, "start") or "node dist/app.js").strip()
+    start_script = app_dir / ".ehpanel-start-git.sh"
+    start_script.write_text(
+        "#!/bin/sh\n"
+        f"set -a\n. {shell_quote(str(env_file))}\nset +a\n"
+        f"cd {shell_quote(str(backend_dir))}\n"
+        f"exec /bin/sh -lc {shell_quote(start_command)}\n",
+        encoding="utf-8",
+    )
+    start_script.chmod(0o755)
+    chown_account(username, app_dir)
+    service = write_systemd_app_service(username, instance_id, backend_dir, start_script, f"EHPanel Git app {instance_id}")
+
+    proxy_path = None
+    if truthy(config.get("proxy_root")):
+        proxy_path = write_app_proxy(domain, instance_id, port, settings)
+    else:
+        routes = [route.strip() for route in str(config.get("proxy_routes") or "/api/,/storage/").split(",") if route.strip()]
+        proxy_path = write_path_proxy(domain, instance_id, port, settings, routes)
+
+    health_path = str(config.get("health_path") or "/health").strip()
+    if health_path and not health_path.startswith("/"):
+        health_path = f"/{health_path}"
+    if health_path and not re.match(r"^/[A-Za-z0-9_.~/-]*$", health_path):
+        raise ValueError("Health path invalido.")
+    health_status = ""
+    if health_path:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{health_path}", timeout=10) as response:
+                health_status = str(response.status)
+        except Exception as exc:
+            health_status = f"failed: {exc}"
+
+    commit = command_stdout(["git", "rev-parse", "--short", "HEAD"], cwd=str(app_dir))
+    return ok(
+        app_id=payload.get("app_id"),
+        item_id=payload.get("item_id"),
+        runtime="git_node",
+        url=public_url(payload, domain, "/"),
+        install_path=str(app_dir),
+        backend_dir=str(backend_dir),
+        frontend_public_dir=frontend_public_dir or "",
+        frontend_backup_dir=frontend_backup_dir,
+        service=service,
+        proxy=str(proxy_path),
+        repo_url=redact_git_url(repo_url),
+        branch=branch,
+        git_commit=commit,
+        health_status=health_status,
+        outputs=outputs,
+    )
 
 
 def deploy_django_app(payload, settings):
@@ -3183,6 +3530,8 @@ def main():
             return install_moodle_app(payload, settings)
         if job_type == "deploy_node_app":
             return deploy_node_app(payload, settings)
+        if job_type == "deploy_git_app":
+            return deploy_git_app(payload, settings)
         if job_type == "deploy_django_app":
             return deploy_django_app(payload, settings)
         if job_type == "deploy_laravel_app":

@@ -17,6 +17,7 @@ from urllib.error import URLError, HTTPError
 from rest_framework import mixins, pagination, permissions, status, viewsets
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 import uuid
@@ -201,6 +202,8 @@ from .services import (
     update_mailbox,
     update_database_user,
     dns_template_records_preview,
+    decrypt_hosting_secret,
+    encrypt_hosting_secret,
     sync_domain_dns,
     suspend_account,
     suspend_ftp_user,
@@ -2733,6 +2736,13 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
     queryset = HostingAdvancedItem.objects.select_related("account", "account__node", "last_job").all()
     serializer_class = HostingAdvancedItemSerializer
     permission_classes = [IsAdminOrScopedUser]
+    git_secret_keys = {"auth_token", "pat", "token", "db_password", "database_url", "webhook_secret"}
+
+    @staticmethod
+    def _truthy(value):
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on", "si"}
 
     def get_queryset(self):
         queryset = super().get_queryset().filter(account__in=scoped_accounts(HostingAccount.objects.all(), self.request.user))
@@ -2744,36 +2754,118 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(kind=kind)
         return queryset
 
-    def _queue_apply(self, item, *, delete=False):
+    def _decrypt_advanced_secrets(self, item):
+        if item.kind != HostingAdvancedItem.Kind.GIT_REPO:
+            return {}
+        encrypted = item.secret_config if isinstance(item.secret_config, dict) else {}
+        return {key: value for key, value in ((key, decrypt_hosting_secret(raw)) for key, raw in encrypted.items()) if value}
+
+    def _persist_advanced_secrets(self, item, secret_values):
+        if not secret_values:
+            return
+        encrypted = dict(item.secret_config or {})
+        for key, value in secret_values.items():
+            if value and value != "********":
+                encrypted[key] = encrypt_hosting_secret(value)
+        item.secret_config = encrypted
+        item.save(update_fields=["secret_config", "updated_at"])
+
+    def _queue_apply(self, item, *, delete=False, transient_config=None):
         from .local_provisioning import dispatch_or_execute_local
 
         item.status = HostingAdvancedItem.Status.PENDING
         item.save(update_fields=["status", "updated_at"])
+        config = item.config if isinstance(item.config, dict) else {}
+        secrets_config = {} if delete else self._decrypt_advanced_secrets(item)
+        runtime_config = {**config, **secrets_config, **(transient_config or {})}
+        app = None
+        auto_deploy = item.kind == HostingAdvancedItem.Kind.GIT_REPO and self._truthy(runtime_config.get("auto_deploy")) and not delete
+        domain = item.account.domains.filter(domain=item.account.primary_domain).first() or item.account.domains.filter(is_primary=True).first() or item.account.domains.first()
+        if auto_deploy:
+            if not domain:
+                raise ValidationError({"account": "La cuenta no tiene un dominio activo para publicar el deploy."})
+            if domain:
+                instance_id = runtime_config.get("instance_id") or f"git-{item.id}"
+                app_metadata = {
+                    "instance_id": instance_id,
+                    "port": int(runtime_config.get("port") or 3001),
+                    "runtime": "git_node",
+                    "git": {
+                        "repo_url": runtime_config.get("repo_url", ""),
+                        "branch": runtime_config.get("branch", "main"),
+                        "strategy": "pat_or_https",
+                    },
+                    "advanced_item_id": item.id,
+                }
+                app_defaults = {
+                    "account": item.account,
+                    "domain": domain,
+                    "app_type": HostingApplication.AppType.NODEJS,
+                    "name": item.name,
+                    "install_path": runtime_config.get("working_dir") or f"/home/{item.account.username}/apps/{instance_id}",
+                    "url": f"https://{domain.domain}/",
+                    "status": HostingApplication.Status.INSTALLING,
+                    "metadata": app_metadata,
+                }
+                app = HostingApplication.objects.filter(domain=domain, app_type=HostingApplication.AppType.NODEJS, metadata__advanced_item_id=item.id).first()
+                if app:
+                    for field, value in app_defaults.items():
+                        setattr(app, field, value)
+                    app.save(update_fields=[
+                        "account",
+                        "domain",
+                        "app_type",
+                        "name",
+                        "install_path",
+                        "url",
+                        "status",
+                        "metadata",
+                        "updated_at",
+                    ])
+                else:
+                    app = HostingApplication.objects.create(**app_defaults)
         job = AgentJob.objects.create(
             node=item.account.node,
-            job_type=AgentJob.Type.SERVICE_ACTION,
+            job_type=AgentJob.Type.DEPLOY_GIT_APP if auto_deploy else AgentJob.Type.SERVICE_ACTION,
             payload={
                 "action": "apply_advanced_item",
                 "item_id": item.id,
                 "account_id": str(item.account_id),
                 "username": item.account.username,
-                "domain": item.account.primary_domain,
+                "domain": domain.domain if domain else item.account.primary_domain,
                 "kind": item.kind,
                 "name": item.name,
                 "enabled": bool(item.enabled) and not delete,
                 "delete": bool(delete),
-                "config": item.config if isinstance(item.config, dict) else {},
+                "config": runtime_config,
+                **({"app_id": app.id, "instance_id": (app.metadata or {}).get("instance_id"), "port": (app.metadata or {}).get("port")} if app else {}),
             },
         )
+        if app:
+            app.last_job = job
+            app.save(update_fields=["last_job", "updated_at"])
         item.last_job = job
         item.save(update_fields=["last_job", "updated_at"])
         dispatch_or_execute_local(job)
         item.refresh_from_db(fields=["status", "last_job", "updated_at"])
         return job
 
+    def _split_transient_advanced_config(self, serializer):
+        config = dict(serializer.validated_data.get("config") or {})
+        secret_values = {}
+        if serializer.validated_data.get("kind") == HostingAdvancedItem.Kind.GIT_REPO:
+            for key in self.git_secret_keys:
+                value = config.pop(key, "")
+                if value and value != "********":
+                    secret_values[key] = value
+        serializer.validated_data["config"] = config
+        return secret_values
+
     def perform_create(self, serializer):
+        secret_values = self._split_transient_advanced_config(serializer)
         item = serializer.save(status=HostingAdvancedItem.Status.PENDING)
-        self._queue_apply(item)
+        self._persist_advanced_secrets(item, secret_values)
+        self._queue_apply(item, transient_config=secret_values)
         audit_action(
             self.request,
             AuditLog.Action.ACCOUNT_UPDATED,
@@ -2783,8 +2875,10 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
         )
 
     def perform_update(self, serializer):
+        secret_values = self._split_transient_advanced_config(serializer)
         item = serializer.save(status=HostingAdvancedItem.Status.PENDING)
-        self._queue_apply(item)
+        self._persist_advanced_secrets(item, secret_values)
+        self._queue_apply(item, transient_config=secret_values)
         audit_action(
             self.request,
             AuditLog.Action.ACCOUNT_UPDATED,

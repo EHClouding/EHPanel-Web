@@ -112,15 +112,4 @@ class AgentJobSerializer(serializers.ModelSerializer):
 
 
 def redact_job_payload(value):
-    if isinstance(value, list):
-        return [redact_job_payload(item) for item in value]
-    if not isinstance(value, dict):
-        return value
-    redacted = {}
-    for key, raw in value.items():
-        normalized = str(key).lower()
-        if any(part in normalized for part in ("password", "secret", "token", "private_key", "auth_secret")):
-            redacted[key] = "********" if raw else raw
-        else:
-            redacted[key] = redact_job_payload(raw)
-    return redacted
+    return AgentJob.redacted_payload(value)

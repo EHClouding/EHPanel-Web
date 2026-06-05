@@ -119,7 +119,7 @@ def execute_local_job(job):
         command = ["sudo", "-n", helper]
 
     try:
-        timeout = 7200 if job.job_type == AgentJob.Type.IMPORT_MAILBOX else 300
+        timeout = 7200 if job.job_type == AgentJob.Type.IMPORT_MAILBOX else 1800 if job.job_type == AgentJob.Type.DEPLOY_GIT_APP else 300
         completed = subprocess.run(
             command,
             input=json.dumps(payload),

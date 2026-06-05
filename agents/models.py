@@ -162,6 +162,7 @@ class AgentJob(models.Model):
         DEPLOY_PYTHON_APP = "deploy_python_app", "Deploy Python app"
         DEPLOY_DJANGO_APP = "deploy_django_app", "Deploy Django app"
         DEPLOY_NODE_APP = "deploy_node_app", "Deploy NodeJS app"
+        DEPLOY_GIT_APP = "deploy_git_app", "Deploy Git app"
         NODE_TOOLKIT = "node_toolkit", "Node toolkit"
         DEPLOY_LARAVEL_APP = "deploy_laravel_app", "Deploy Laravel app"
         LARAVEL_TOOLKIT = "laravel_toolkit", "Laravel toolkit"
@@ -238,7 +239,23 @@ class AgentJob(models.Model):
         self.status = self.Status.SENT
         self.correlation_id = correlation_id
         self.sent_at = timezone.now()
-        self.save(update_fields=["status", "correlation_id", "sent_at", "updated_at"])
+        self.payload = self.redacted_payload(self.payload)
+        self.save(update_fields=["status", "correlation_id", "sent_at", "payload", "updated_at"])
+
+    @classmethod
+    def redacted_payload(cls, value):
+        if isinstance(value, list):
+            return [cls.redacted_payload(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        redacted = {}
+        for key, raw in value.items():
+            normalized = str(key).lower()
+            if any(part in normalized for part in ("password", "secret", "token", "private_key", "auth_secret")):
+                redacted[key] = "********" if raw else raw
+            else:
+                redacted[key] = cls.redacted_payload(raw)
+        return redacted
 
     def mark_running(self):
         self.status = self.Status.RUNNING

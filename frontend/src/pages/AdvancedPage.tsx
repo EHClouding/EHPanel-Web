@@ -1,9 +1,11 @@
 import {
   Activity,
+  Database,
   GitBranch,
   KeyRound,
   Plus,
   RefreshCcw,
+  Rocket,
   Search,
   Settings2,
   Terminal,
@@ -52,6 +54,33 @@ const kindLabels: Record<HostingAdvancedKind, string> = {
   variable: "Variable",
   vhost_manual: "VHost manual",
   webhook: "Webhook",
+}
+
+type FieldKind = "checkbox" | "select" | "textarea" | "text"
+
+type AdvancedField = {
+  help?: string
+  key: string
+  kind?: FieldKind
+  label: string
+  multiline?: boolean
+  options?: Array<{ label: string; value: string }>
+  placeholder: string
+  secret?: boolean
+  section?: string
+}
+
+const defaultGitDeployValues: Record<string, string> = {
+  auto_deploy: "true",
+  branch: "main",
+  database_engine: "postgresql",
+  frontend_dist: "dist",
+  health_path: "/health",
+  package_manager: "auto",
+  port: "3001",
+  proxy_routes: "/api/,/storage/",
+  serve_frontend: "true",
+  working_dir: "apps/app",
 }
 
 export function AdvancedPage() {
@@ -137,7 +166,7 @@ export function AdvancedPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
           <div>
             <h2 className="text-base font-bold">Avanzado</h2>
-            <p className="text-xs text-slate-500">Git, cron, variables, claves, webhooks y configuracion tecnica del sitio.</p>
+            <p className="text-xs text-slate-500">Deploy desde repositorio, cron, variables, claves, webhooks y configuracion tecnica del sitio.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {accounts.length > 1 ? (
@@ -181,6 +210,17 @@ export function AdvancedPage() {
             <JobsTab summary={summary} />
           ) : activeTab === "VHost Manual" ? (
             <VhostManualTab items={items} onAdd={() => setModal("vhost_manual")} onDelete={deleteItem} onToggle={toggleItem} search={search} setSearch={setSearch} />
+          ) : activeTab === "Git / Deploy" ? (
+            <GitDeployTab
+              items={items}
+              loading={loading}
+              onAdd={() => setModal("git_repo")}
+              onDelete={deleteItem}
+              onToggle={toggleItem}
+              search={search}
+              setSearch={setSearch}
+              summary={summary}
+            />
           ) : (
             <ItemsTab
               items={items}
@@ -208,6 +248,75 @@ export function AdvancedPage() {
           }}
         />
       ) : null}
+    </div>
+  )
+}
+
+function GitDeployTab({
+  items,
+  loading,
+  onAdd,
+  onDelete,
+  onToggle,
+  search,
+  setSearch,
+  summary,
+}: {
+  items: HostingAdvancedItem[]
+  loading: boolean
+  onAdd: () => void
+  onDelete: (item: HostingAdvancedItem) => void
+  onToggle: (item: HostingAdvancedItem) => void
+  search: string
+  setSearch: (value: string) => void
+  summary: AdvancedSummaryResponse | null
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 lg:grid-cols-3">
+        <WorkflowStep icon={GitBranch} label="Repositorio" text="URL publica, privada con PAT o SSH deploy key por cuenta." />
+        <WorkflowStep icon={Database} label="Autoconfig" text="Ruta, env, PostgreSQL/MariaDB, comandos y frontend estatico." />
+        <WorkflowStep icon={Rocket} label="Activacion" text="systemd, Nginx, proxy /api y health check en el dominio." />
+      </div>
+      <Toolbar actionLabel="Instalar desde Git" disabled={loading} onAction={onAdd} search={search} setSearch={setSearch} />
+      {(summary?.apps_with_git || []).length ? (
+        <SimpleTable
+          columns={["Aplicacion", "Runtime", "Repositorio", "Branch", "Actualizado"]}
+          emptyText="Sin apps instaladas desde Git."
+          rows={(summary?.apps_with_git || []).map((app) => [
+            String(app.app_name || app.app_id),
+            String(app.app_type || "-"),
+            String(app.repo_url || "-"),
+            String(app.branch || "main"),
+            formatDate(String(app.updated_at || "")),
+          ])}
+        />
+      ) : null}
+      <SimpleTable
+        columns={["Nombre", "Detalle", "Estado", "Actualizado", "Acciones"]}
+        emptyText="Sin repositorios Git registrados."
+        rows={items.map((item) => [
+          item.name,
+          <ConfigSummary item={item} />,
+          <StatusBadge status={item.status} enabled={item.enabled} />,
+          formatDate(item.updated_at),
+          <Actions item={item} onDelete={onDelete} onToggle={onToggle} />,
+        ])}
+      />
+    </div>
+  )
+}
+
+function WorkflowStep({ icon: Icon, label, text }: { icon: typeof GitBranch; label: string; text: string }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-3">
+      <div className="flex items-start gap-3">
+        <div className="grid h-9 w-9 place-items-center rounded-md bg-blue-50 text-blue-700"><Icon className="h-4 w-4" /></div>
+        <div>
+          <div className="text-sm font-bold text-slate-900">{label}</div>
+          <div className="mt-1 text-xs font-medium leading-5 text-slate-500">{text}</div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -371,7 +480,7 @@ function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: strin
   const fields = fieldsForKind(kind)
   const [name, setName] = useState("")
   const [enabled, setEnabled] = useState(true)
-  const [values, setValues] = useState<Record<string, string>>({})
+  const [values, setValues] = useState<Record<string, string>>(() => kind === "git_repo" ? defaultGitDeployValues : {})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
 
@@ -416,11 +525,20 @@ function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: strin
             {fields.map((field) => (
               <label className={cn("block", field.multiline ? "md:col-span-2" : "")} key={field.key}>
                 <span className="mb-1.5 block text-xs font-bold text-slate-600">{field.label}</span>
-                {field.multiline ? (
+                {field.kind === "select" ? (
+                  <select className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-500" onChange={(event) => setValues({ ...values, [field.key]: event.target.value })} value={values[field.key] || ""}>
+                    {(field.options || []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                ) : field.kind === "checkbox" ? (
+                  <button className={cn("flex h-9 w-full items-center justify-between rounded-md border px-3 text-sm font-bold", values[field.key] === "true" ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500")} onClick={() => setValues({ ...values, [field.key]: values[field.key] === "true" ? "false" : "true" })} type="button">
+                    {values[field.key] === "true" ? "Activo" : "Inactivo"}
+                  </button>
+                ) : field.multiline || field.kind === "textarea" ? (
                   <textarea className="min-h-[120px] w-full rounded-md border border-slate-200 px-3 py-2 font-mono text-xs outline-none focus:border-blue-500" onChange={(event) => setValues({ ...values, [field.key]: event.target.value })} placeholder={field.placeholder} value={values[field.key] || ""} />
                 ) : (
                   <input className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-500" onChange={(event) => setValues({ ...values, [field.key]: event.target.value })} placeholder={field.placeholder} type={field.secret ? "password" : "text"} value={values[field.key] || ""} />
                 )}
+                {field.help ? <span className="mt-1 block text-[11px] font-medium leading-4 text-slate-500">{field.help}</span> : null}
               </label>
             ))}
           </div>
@@ -439,7 +557,7 @@ function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: strin
 }
 
 function fieldsForKind(kind: HostingAdvancedKind) {
-  const fields: Record<HostingAdvancedKind, Array<{ key: string; label: string; placeholder: string; secret?: boolean; multiline?: boolean }>> = {
+  const fields: Record<HostingAdvancedKind, AdvancedField[]> = {
     cron: [
       { key: "command", label: "Comando", placeholder: "php artisan schedule:run" },
       { key: "schedule", label: "Frecuencia", placeholder: "*/5 * * * *" },
@@ -447,10 +565,32 @@ function fieldsForKind(kind: HostingAdvancedKind) {
       { key: "working_dir", label: "Directorio", placeholder: "public_html" },
     ],
     git_repo: [
+      { key: "auto_deploy", kind: "checkbox", label: "Instalar y activar", placeholder: "", help: "Clona, instala, construye, crea servicio y publica el dominio." },
       { key: "repo_url", label: "Repositorio Git", placeholder: "https://github.com/cliente/proyecto.git" },
       { key: "branch", label: "Branch", placeholder: "main" },
-      { key: "build_command", label: "Comando build", placeholder: "pnpm install && pnpm build" },
-      { key: "deploy_command", label: "Comando deploy", placeholder: "rsync -a dist/ public_html/" },
+      { key: "auth_token", label: "Token PAT", placeholder: "github_pat_... / ghp_...", secret: true, help: "Se usa para este deploy y no se guarda en la configuracion avanzada." },
+      { key: "working_dir", label: "Ruta de instalacion", placeholder: "apps/starsystem", help: "Ruta relativa o absoluta dentro de la cuenta hosting." },
+      { key: "instance_id", label: "ID app", placeholder: "starsystem" },
+      { key: "port", label: "Puerto interno", placeholder: "3001" },
+      { key: "backend_dir", label: "Directorio backend", placeholder: "backend" },
+      { key: "frontend_dir", label: "Directorio frontend", placeholder: "frontend" },
+      { key: "package_manager", kind: "select", label: "Package manager", options: [{ label: "Auto", value: "auto" }, { label: "npm", value: "npm" }, { label: "pnpm", value: "pnpm" }, { label: "yarn", value: "yarn" }], placeholder: "auto" },
+      { key: "install_command", label: "Install backend", placeholder: "Auto segun lockfile", help: "Vacio = npm/pnpm/yarn detectado automaticamente." },
+      { key: "build_command", label: "Build backend", placeholder: "Auto si existe script build", help: "Vacio = usa el script build si existe." },
+      { key: "migrate_command", label: "Migracion", placeholder: "npx prisma migrate deploy" },
+      { key: "seed_command", label: "Seed opcional", placeholder: "npm run seed" },
+      { key: "start_command", label: "Start", placeholder: "Auto script start / node dist/app.js", help: "Vacio = usa script start si existe; si no, node dist/app.js." },
+      { key: "frontend_install_command", label: "Install frontend", placeholder: "Auto segun lockfile", help: "Vacio = npm/pnpm/yarn detectado automaticamente." },
+      { key: "frontend_build_command", label: "Build frontend", placeholder: "Auto si existe script build", help: "Vacio = usa el script build si existe." },
+      { key: "frontend_dist", label: "Dist frontend", placeholder: "dist" },
+      { key: "serve_frontend", kind: "checkbox", label: "Publicar frontend", placeholder: "" },
+      { key: "proxy_routes", label: "Proxy backend", placeholder: "/api/,/storage/" },
+      { key: "health_path", label: "Health check", placeholder: "/health" },
+      { key: "database_engine", kind: "select", label: "Base de datos", options: [{ label: "PostgreSQL", value: "postgresql" }, { label: "MariaDB", value: "mariadb" }], placeholder: "postgresql" },
+      { key: "db_name", label: "Nombre DB", placeholder: "starsystem_db" },
+      { key: "db_user", label: "Usuario DB", placeholder: "starsystem_user" },
+      { key: "db_password", label: "Password DB", placeholder: "Password seguro", secret: true, help: "Se usa para crear la DB y no se guarda en la configuracion avanzada." },
+      { key: "env_vars", kind: "textarea", label: "Variables .env extra", placeholder: "APP_ENV=production\nJWT_SECRET=...\nJWT_REFRESH_SECRET=...", multiline: true },
       { key: "webhook_secret", label: "Webhook secret", placeholder: "Secreto firmado", secret: true },
     ],
     header: [
@@ -528,21 +668,33 @@ function statusLabel(value: string) {
 
 function labelKey(key: string) {
   const labels: Record<string, string> = {
+    auto_deploy: "Auto deploy",
+    auth_token: "PAT",
     apache_http: "Apache HTTP",
     apache_https: "Apache HTTPS",
     branch: "Branch",
+    backend_dir: "Backend",
     build_command: "Build",
     code: "Tipo",
     command: "Comando",
+    database_engine: "DB",
     deploy_command: "Deploy",
+    env_vars: "Env",
     event: "Evento",
+    frontend_dir: "Frontend",
     header: "Header",
+    instance_id: "App ID",
     key: "Clave",
     nginx: "Nginx",
+    package_manager: "PM",
+    port: "Puerto",
+    proxy_routes: "Proxy",
     repo_url: "Repo",
     schedule: "Frecuencia",
     scope: "Scope",
+    serve_frontend: "Frontend",
     source: "Origen",
+    start_command: "Start",
     target: "Destino",
     url: "URL",
     user: "Usuario",
