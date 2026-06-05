@@ -1226,6 +1226,27 @@ def package_script_command(path, package_manager, script):
     return f"{runner} run {script}"
 
 
+def transient_node_types_command(package_manager):
+    package_manager = str(package_manager or "npm").strip().lower()
+    if package_manager == "pnpm":
+        return "pnpm add -D @types/node --config.save=false"
+    if package_manager == "yarn":
+        return "yarn add -D @types/node --no-lockfile"
+    return "npm install --no-save @types/node"
+
+
+def needs_node_types_retry(result):
+    text = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+    return "@types/node" in text or ("Cannot find module 'path'" in text and "__dirname" in text)
+
+
+def safe_db_slug(*parts, max_len=48):
+    raw = "_".join(str(part or "") for part in parts)
+    value = re.sub(r"[^A-Za-z0-9_]", "_", raw).strip("_").lower()
+    value = re.sub(r"_+", "_", value)[:max_len].strip("_")
+    return value or f"app_{secrets.token_hex(4)}"
+
+
 def require_binary(binary):
     if not shutil.which(binary):
         raise ValueError(f"No se encontro el binario requerido: {binary}")
@@ -1705,6 +1726,14 @@ def deploy_git_app(payload, settings):
         create_database({"engine": engine, "database": config["db_name"], "user": config["db_user"], "password": config["db_password"]}, emit=False)
         scheme = "postgresql" if engine == "postgresql" else "mysql"
         env_values.setdefault("DATABASE_URL", f"{scheme}://{config['db_user']}:{config['db_password']}@localhost:5432/{config['db_name']}" if engine == "postgresql" else f"{scheme}://{config['db_user']}:{config['db_password']}@localhost:3306/{config['db_name']}")
+    elif config.get("database_engine"):
+        engine = str(config.get("database_engine") or "postgresql").lower()
+        db_name = safe_db_slug(username, instance_id, "db")
+        db_user = safe_db_slug(username, instance_id, "user")
+        db_password = secrets.token_urlsafe(32)
+        create_database({"engine": engine, "database": db_name, "user": db_user, "password": db_password}, emit=False)
+        scheme = "postgresql" if engine == "postgresql" else "mysql"
+        env_values.setdefault("DATABASE_URL", f"{scheme}://{db_user}:{db_password}@localhost:5432/{db_name}" if engine == "postgresql" else f"{scheme}://{db_user}:{db_password}@localhost:3306/{db_name}")
     if not env_values.get("JWT_SECRET"):
         env_values["JWT_SECRET"] = secrets.token_urlsafe(48)
     if not env_values.get("JWT_REFRESH_SECRET"):
@@ -1745,6 +1774,12 @@ def deploy_git_app(payload, settings):
     command_env = {"CI": "true", "PATH": "/usr/local/bin:/usr/bin:/bin"}
     for label, cwd, command in commands:
         result = run_account_shell(username, command, cwd, env=command_env, check=False)
+        if label in {"build", "frontend_build"} and result["returncode"] != 0 and needs_node_types_retry(result):
+            retry_pm = frontend_pm if label == "frontend_build" and "frontend_pm" in locals() else package_manager
+            fix_result = run_account_shell(username, transient_node_types_command(retry_pm), cwd, env=command_env, check=False)
+            outputs.append({"step": f"{label}_install_node_types", "returncode": fix_result["returncode"], "stdout_tail": (fix_result.get("stdout") or "")[-2000:], "stderr_tail": (fix_result.get("stderr") or "")[-2000:]})
+            if fix_result["returncode"] == 0:
+                result = run_account_shell(username, command, cwd, env=command_env, check=False)
         outputs.append({"step": label, "returncode": result["returncode"], "stdout_tail": (result.get("stdout") or "")[-2000:], "stderr_tail": (result.get("stderr") or "")[-2000:]})
         if result["returncode"] != 0:
             raise RuntimeError(f"Paso {label} fallo: {result.get('stderr') or result.get('stdout')}")
