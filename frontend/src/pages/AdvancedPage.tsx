@@ -81,6 +81,7 @@ const defaultGitDeployValues: Record<string, string> = {
   proxy_routes: "/api/,/storage/",
   runtime: "auto",
   serve_frontend: "true",
+  spa_fallback: "true",
   working_dir: "apps/app",
 }
 
@@ -645,6 +646,7 @@ function fieldsForKind(kind: HostingAdvancedKind) {
       { key: "frontend_build_command", label: "Build frontend", placeholder: "Auto si existe script build", help: "Vacio = usa el script build si existe." },
       { key: "frontend_dist", label: "Dist frontend", placeholder: "dist" },
       { key: "serve_frontend", kind: "checkbox", label: "Publicar frontend", placeholder: "" },
+      { key: "spa_fallback", kind: "checkbox", label: "Fallback SPA", placeholder: "", help: "Hace que rutas como /login o /dashboard carguen index.html al refrescar." },
       { key: "proxy_routes", label: "Proxy backend", placeholder: "/api/,/storage/" },
       { key: "health_path", label: "Health check", placeholder: "/health" },
       { key: "database_engine", kind: "select", label: "Base de datos", options: [{ label: "PostgreSQL", value: "postgresql" }, { label: "MariaDB", value: "mariadb" }], placeholder: "postgresql" },
@@ -759,6 +761,7 @@ function labelKey(key: string) {
     schedule: "Frecuencia",
     scope: "Scope",
     serve_frontend: "Frontend",
+    spa_fallback: "SPA fallback",
     source: "Origen",
     start_command: "Start",
     target: "Destino",

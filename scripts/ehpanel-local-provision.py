@@ -808,6 +808,11 @@ context / {{
   allowBrowse             1
 }}
 
+rewrite  {{
+  enable                  1
+  autoLoadHtaccess        1
+}}
+
 scripthandler  {{
   add                     lsapi:{handler_name} php
 }}
@@ -1290,6 +1295,25 @@ def python_install_command(backend_dir):
     return ".venv/bin/pip install django gunicorn psycopg[binary] dj-database-url python-dotenv"
 
 
+def detect_frontend_spa(path):
+    path = Path(path)
+    package_json = path / "package.json"
+    if not package_json.exists():
+        return False
+    try:
+        package = json.loads(package_json.read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        package = {}
+    deps = {**(package.get("dependencies") or {}), **(package.get("devDependencies") or {})} if isinstance(package, dict) else {}
+    return any(dep in deps for dep in ["vite", "@vitejs/plugin-react", "@vitejs/plugin-vue", "react", "vue"]) or (path / "vite.config.ts").exists() or (path / "vite.config.js").exists()
+
+
+def should_write_spa_fallback(config, frontend_dir):
+    if "spa_fallback" in config:
+        return truthy(config.get("spa_fallback"))
+    return detect_frontend_spa(frontend_dir) if frontend_dir else False
+
+
 def deploy_git_django_app(payload, settings, app_dir, backend_dir, frontend_dir, config, env_values, username, domain, instance_id, port):
     require_binary("python3")
     venv = backend_dir / ".venv"
@@ -1356,6 +1380,8 @@ def deploy_git_django_app(payload, settings, app_dir, backend_dir, frontend_dir,
         dist_dir = frontend_dir / str(config.get("frontend_dist") or "dist").strip().strip("/")
         public_dir = account_document_root(username, settings, config.get("document_root") or "public_html")
         frontend_copy = copy_frontend_dist(dist_dir, public_dir, username)
+        if should_write_spa_fallback(config, frontend_dir):
+            write_spa_fallback(public_dir, username)
         frontend_public_dir = frontend_copy["public_dir"]
         frontend_backup_dir = frontend_copy["backup_dir"]
 
@@ -1513,6 +1539,27 @@ def copy_frontend_dist(source, public_dir, username):
     if backup_dir:
         chown_account(username, backup_dir.parent)
     return {"public_dir": str(public_dir), "backup_dir": str(backup_dir or "")}
+
+
+def write_spa_fallback(public_dir, username):
+    public_dir = Path(public_dir)
+    htaccess = public_dir / ".htaccess"
+    htaccess.write_text(
+        """<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /
+RewriteRule ^index\\.html$ - [L]
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+RewriteRule . /index.html [L]
+</IfModule>
+""",
+        encoding="utf-8",
+    )
+    htaccess.chmod(0o644)
+    run(["chown", f"{username}:{username}", str(htaccess)], check=False)
+    return htaccess
 
 
 def public_url(payload, domain, path=""):
@@ -1985,6 +2032,8 @@ def deploy_git_app(payload, settings):
         dist_dir = frontend_dir / str(config.get("frontend_dist") or "dist").strip().strip("/")
         public_dir = account_document_root(username, settings, config.get("document_root") or "public_html")
         frontend_copy = copy_frontend_dist(dist_dir, public_dir, username)
+        if should_write_spa_fallback(config, frontend_dir):
+            write_spa_fallback(public_dir, username)
         frontend_public_dir = frontend_copy["public_dir"]
         frontend_backup_dir = frontend_copy["backup_dir"]
 

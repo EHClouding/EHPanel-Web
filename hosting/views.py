@@ -2886,6 +2886,11 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
         if frontend_candidates:
             frontend_candidates.sort(key=lambda item: (-item[0], len(item[1].relative_to(root).parts)))
             frontend_dir = frontend_candidates[0][1]
+        spa_fallback = False
+        if frontend_dir:
+            frontend_package = next((info for info in package_infos if info["path"] == frontend_dir), None)
+            frontend_deps = (frontend_package or {}).get("deps") or {}
+            spa_fallback = any(dep in frontend_deps for dep in ["vite", "@vitejs/plugin-react", "@vitejs/plugin-vue", "react", "vue"]) or (frontend_dir / "vite.config.ts").exists() or (frontend_dir / "vite.config.js").exists()
 
         if runtime == "node" and package_infos:
             backend_candidates = []
@@ -2932,6 +2937,7 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
             "frontend_package_manager": frontend_pm,
             "database_engine": "postgresql",
             "serve_frontend": "true" if frontend_rel else "false",
+            "spa_fallback": "true" if spa_fallback else "false",
             "frontend_dist": "dist",
             "health_path": "/health" if runtime == "node" else "",
         }
