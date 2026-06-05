@@ -1266,6 +1266,7 @@ def git_authenticated_env(username, token):
     token = str(token or "").strip()
     if not token:
         return {}, None
+    validate_username(username)
     temp_dir = Path("/tmp") / f"ehpanel-git-{secrets.token_hex(8)}"
     temp_dir.mkdir(mode=0o700)
     askpass = temp_dir / "askpass.sh"
@@ -1278,6 +1279,7 @@ def git_authenticated_env(username, token):
         encoding="utf-8",
     )
     askpass.chmod(0o700)
+    run(["chown", "-R", f"{username}:{username}", str(temp_dir)], check=False)
     return {"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0"}, temp_dir
 
 
