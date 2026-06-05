@@ -369,7 +369,16 @@ class ContractProvisionSerializer(serializers.Serializer):
 
 class ContractChangePasswordSerializer(serializers.Serializer):
     request_id = serializers.CharField(required=False, allow_blank=True, max_length=160)
-    password = serializers.CharField(min_length=8, max_length=255)
+    password = serializers.CharField(required=False, allow_blank=True, min_length=8, max_length=255)
+    new_password = serializers.CharField(required=False, allow_blank=True, min_length=8, max_length=255)
+    account_password = serializers.CharField(required=False, allow_blank=True, min_length=8, max_length=255)
+
+    def validate(self, attrs):
+        password = attrs.get("password") or attrs.get("new_password") or attrs.get("account_password")
+        if not password:
+            raise serializers.ValidationError({"password": "La nueva contrasena es requerida."})
+        attrs["password"] = password
+        return attrs
 
 
 class ContractChangePlanSerializer(serializers.Serializer):
@@ -537,13 +546,16 @@ class BillingServiceDetailView(APIView):
             "last_usage_at": account.last_usage_at.isoformat() if account.last_usage_at else "",
         }
 
-    def post_action_response(self, request, account, status_value, message, request_id="", action_name=""):
+    def post_action_response(self, request, account, status_value, message, request_id="", action_name="", metadata=None):
+        metadata = metadata or {}
         account.billing_synced_at = timezone.now()
         account.billing_metadata = billing_metadata(account, last_action=status_value)
         remember_action_request(account, request_id, action_name or status_value, status_value, message)
         account.save(update_fields=["billing_synced_at", "billing_metadata", "updated_at"])
-        audit_billing_call(request, AuditLog.Action.ACCOUNT_UPDATED, account, status_code=202, metadata={"request_id": request_id, "billing_action": action_name or status_value})
-        return Response(contract_account_response(request, account, status_value=status_value, message=message), status=drf_status.HTTP_202_ACCEPTED)
+        audit_billing_call(request, AuditLog.Action.ACCOUNT_UPDATED, account, status_code=202, metadata={"request_id": request_id, "billing_action": action_name or status_value, **metadata})
+        response = contract_account_response(request, account, status_value=status_value, message=message)
+        response.update(metadata)
+        return Response(response, status=drf_status.HTTP_202_ACCEPTED)
 
     def idempotent_action_response(self, request, account, request_id, action_name):
         entry = stored_action_request(account, request_id, action_name)
@@ -603,11 +615,8 @@ class BillingServiceDetailView(APIView):
         serializer = ContractChangePasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         request_id = get_action_request_id(serializer.validated_data)
-        existing = self.idempotent_action_response(request, account, request_id, "change-password")
-        if existing:
-            return existing
-        change_account_password(account, serializer.validated_data["password"])
-        return self.post_action_response(request, account, "password_changed", "Password enviado al panel", request_id=request_id, action_name="change-password")
+        job = change_account_password(account, serializer.validated_data["password"])
+        return self.post_action_response(request, account, "password_changed", "Password enviado al panel", request_id=request_id, action_name="change-password", metadata={"job": str(job.id)})
 
     def change_plan(self, request, external_service_id):
         account = self.get_account(external_service_id)

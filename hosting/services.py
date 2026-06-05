@@ -1387,7 +1387,7 @@ def change_account_password(account, password):
         ensure_account_panel_user(account, password)
         return queue_account_job(
             account,
-            AgentJob.Type.CREATE_SFTP_USER,
+            AgentJob.Type.ROTATE_SFTP_PASSWORD,
             {"username": account.username, "password": password},
         )
 

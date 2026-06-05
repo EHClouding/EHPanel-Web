@@ -124,6 +124,16 @@ def ensure_user(username, password, home_root):
     return home
 
 
+def rotate_sftp_password(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    password = str(payload.get("password") or "")
+    if len(password) < 8:
+        return fail("INVALID_PASSWORD", "La contrasena debe tener al menos 8 caracteres.")
+    home = ensure_user(username, password, settings["home_root"])
+    return ok(username=username, home=str(home), password_updated=True)
+
+
 def safe_vhost_name(domain):
     return re.sub(r"[^a-z0-9_.-]", "_", domain.lower())
 
@@ -2920,6 +2930,8 @@ def main():
         if job_type == "create_sftp_user":
             ensure_user(payload["username"], payload.get("password", ""), settings["home_root"])
             return ok(username=payload["username"])
+        if job_type == "rotate_sftp_password":
+            return rotate_sftp_password(payload, settings)
         if job_type == "create_ftp_user":
             return create_ftp_user(payload, settings)
         if job_type == "delete_ftp_user":
