@@ -67,6 +67,12 @@ type UploadSession = {
   total: number
   totalFiles: number
 }
+type FileTaskSession = {
+  detail: string
+  kind: "compress" | "extract"
+  startedAt: number
+  title: string
+}
 
 export function FilesPage() {
   const [accounts, setAccounts] = useState<HostingAccount[]>([])
@@ -87,6 +93,8 @@ export function FilesPage() {
   const [isApplyingOpenLiteSpeed, setIsApplyingOpenLiteSpeed] = useState(false)
   const [isDraggingFiles, setIsDraggingFiles] = useState(false)
   const [uploadSession, setUploadSession] = useState<UploadSession | null>(null)
+  const [fileTaskSession, setFileTaskSession] = useState<FileTaskSession | null>(null)
+  const [fileTaskElapsed, setFileTaskElapsed] = useState(0)
   const [message, setMessage] = useState("")
   const [error, setError] = useState("")
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -146,6 +154,20 @@ export function FilesPage() {
     if (!accountId) return
     void Promise.resolve().then(() => loadFiles(accountId, currentPath))
   }, [accountId, currentPath, loadFiles])
+
+  useEffect(() => {
+    if (!fileTaskSession) {
+      setFileTaskElapsed(0)
+      return
+    }
+
+    const updateElapsed = () => {
+      setFileTaskElapsed(Math.max(0, Math.floor((Date.now() - fileTaskSession.startedAt) / 1000)))
+    }
+    updateElapsed()
+    const timer = window.setInterval(updateElapsed, 1000)
+    return () => window.clearInterval(timer)
+  }, [fileTaskSession])
 
   const openFolder = (entry: FileEntry) => {
     if (entry.kind !== "folder") return
@@ -292,30 +314,50 @@ export function FilesPage() {
   }
   const handleCompress = async (payload: { archiveName: string; destinationPath: string; format: ArchiveFormat }) => {
     if (!selectedFiles.length) return
-    await runFileMutation(
-      () =>
-        hostingApi.fileCompress(accountId, {
-          archive_name: payload.archiveName,
-          destination_path: payload.destinationPath,
-          format: payload.format,
-          paths: selectedFiles.map((entry) => entry.path),
-        }),
-      "Archivo comprimido creado.",
-    )
-    setOperation(null)
+    setFileTaskSession({
+      detail: `${selectedFiles.length} elemento(s) -> ${joinPath(payload.destinationPath, `${payload.archiveName}.${payload.format}`)}`,
+      kind: "compress",
+      startedAt: Date.now(),
+      title: "Comprimiendo archivos",
+    })
+    try {
+      await runFileMutation(
+        () =>
+          hostingApi.fileCompress(accountId, {
+            archive_name: payload.archiveName,
+            destination_path: payload.destinationPath,
+            format: payload.format,
+            paths: selectedFiles.map((entry) => entry.path),
+          }),
+        "Archivo comprimido creado.",
+      )
+      setOperation(null)
+    } finally {
+      setFileTaskSession(null)
+    }
   }
   const handleExtract = async (payload: { destinationPath: string; format?: ArchiveFormat }) => {
     if (!selectedArchive) return
-    await runFileMutation(
-      () =>
-        hostingApi.fileExtract(accountId, {
-          destination_path: payload.destinationPath,
-          format: payload.format,
-          path: selectedArchive.path,
-        }),
-      "Archivo extraido.",
-    )
-    setOperation(null)
+    setFileTaskSession({
+      detail: `${selectedArchive.name} -> ${payload.destinationPath}`,
+      kind: "extract",
+      startedAt: Date.now(),
+      title: "Extrayendo archivo",
+    })
+    try {
+      await runFileMutation(
+        () =>
+          hostingApi.fileExtract(accountId, {
+            destination_path: payload.destinationPath,
+            format: payload.format,
+            path: selectedArchive.path,
+          }),
+        "Archivo extraido.",
+      )
+      setOperation(null)
+    } finally {
+      setFileTaskSession(null)
+    }
   }
 
   const applyOpenLiteSpeedChanges = async () => {
@@ -678,6 +720,7 @@ export function FilesPage() {
           editorContent={editorContent}
           file={operation === "extract" ? selectedArchive : selectedFile}
           files={selectedFiles}
+          isBusy={Boolean(fileTaskSession)}
           mode={operation}
           onChangeChmod={setChmodValue}
           onChangeContent={setEditorContent}
@@ -688,6 +731,7 @@ export function FilesPage() {
           onSaveFile={() => void handleSaveFile()}
         />
       )}
+      {fileTaskSession && <FileTaskProgressModal elapsedSeconds={fileTaskElapsed} session={fileTaskSession} />}
     </div>
   )
 }
@@ -785,6 +829,34 @@ function UploadProgressModal({ session }: { session: UploadSession }) {
   )
 }
 
+function FileTaskProgressModal({ elapsedSeconds, session }: { elapsedSeconds: number; session: FileTaskSession }) {
+  const Icon = session.kind === "compress" ? Archive : FileArchive
+
+  return (
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/45 px-4">
+      <div className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-5 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-md bg-blue-50 text-blue-700">
+            <Icon className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-bold text-slate-900">{session.title}</div>
+            <div className="mt-1 truncate text-xs font-semibold text-slate-500">{session.detail}</div>
+          </div>
+          <div className="text-xs font-bold text-blue-700">{formatElapsed(elapsedSeconds)}</div>
+        </div>
+        <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
+          <div className="h-full w-2/3 rounded-full bg-blue-600 animate-pulse" />
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-3 text-xs font-semibold text-slate-500">
+          <span>Procesando en el nodo</span>
+          <span>Esperando confirmacion</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function QuickCreate({
   active,
   buttonIcon: ButtonIcon,
@@ -846,6 +918,7 @@ function FileOperationModal({
   editorContent,
   file,
   files,
+  isBusy,
   mode,
   onChangeChmod,
   onChangeContent,
@@ -860,6 +933,7 @@ function FileOperationModal({
   editorContent: string
   file: FileEntry | null
   files: FileEntry[]
+  isBusy: boolean
   mode: FileOperation
   onChangeChmod: (value: string) => void
   onChangeContent: (value: string) => void
@@ -893,7 +967,7 @@ function FileOperationModal({
             <div className="eh-kicker">{currentPath}</div>
             <h3 className="mt-1 text-lg font-bold">{titleByMode[mode]}</h3>
           </div>
-          <button className="grid h-8 w-8 place-items-center rounded-md text-slate-500 hover:bg-slate-100" onClick={onClose} type="button">
+          <button className="grid h-8 w-8 place-items-center rounded-md text-slate-500 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40" disabled={isBusy} onClick={onClose} type="button">
             <XCircle className="h-4 w-4" />
           </button>
         </div>
@@ -988,23 +1062,23 @@ function FileOperationModal({
         )}
 
         <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-5 py-3">
-          <Button onClick={onClose} size="sm" type="button" variant="outline">
+          <Button disabled={isBusy} onClick={onClose} size="sm" type="button" variant="outline">
             Cancelar
           </Button>
           {mode === "permissions" ? (
-            <Button onClick={onSaveChmod} size="sm" type="button">
+            <Button disabled={isBusy} onClick={onSaveChmod} size="sm" type="button">
               Aplicar
             </Button>
           ) : mode === "compress" ? (
-            <Button disabled={!canCompress} onClick={() => onCompress({ archiveName, destinationPath, format: archiveFormat })} size="sm" type="button">
-              Comprimir
+            <Button disabled={!canCompress || isBusy} onClick={() => onCompress({ archiveName, destinationPath, format: archiveFormat })} size="sm" type="button">
+              {isBusy ? "Comprimiendo..." : "Comprimir"}
             </Button>
           ) : mode === "extract" ? (
-            <Button disabled={!canExtract} onClick={() => onExtract({ destinationPath, format: inferArchiveFormat(file?.name) })} size="sm" type="button">
-              Extraer
+            <Button disabled={!canExtract || isBusy} onClick={() => onExtract({ destinationPath, format: inferArchiveFormat(file?.name) })} size="sm" type="button">
+              {isBusy ? "Extrayendo..." : "Extraer"}
             </Button>
           ) : editable ? (
-            <Button onClick={onSaveFile} size="sm" type="button">
+            <Button disabled={isBusy} onClick={onSaveFile} size="sm" type="button">
               Guardar
             </Button>
           ) : null}
@@ -1315,6 +1389,13 @@ function formatBytes(value: number) {
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${value} B`
+}
+
+function formatElapsed(seconds: number) {
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+  if (minutes <= 0) return `${remainingSeconds}s`
+  return `${minutes}m ${remainingSeconds.toString().padStart(2, "0")}s`
 }
 
 function downloadBlob(filename: string, blob: Blob) {
