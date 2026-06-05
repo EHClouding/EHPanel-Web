@@ -3,6 +3,8 @@ import os
 import platform
 import socket
 import subprocess
+import sys
+from pathlib import Path
 
 from django.conf import settings
 from django.utils import timezone
@@ -148,7 +150,77 @@ def execute_local_job(job):
     return job
 
 
-def dispatch_or_execute_local(job, run=None, account_id=None):
+def sync_local_job_post_effects(job, run=None, account_id=None):
+    from .services import sync_job_side_effects
+
+    sync_job_side_effects(job)
+    if run:
+        run.sync_from_jobs()
+    elif account_id and job.status == AgentJob.Status.SUCCESS:
+        from .models import HostingAccount
+
+        account = HostingAccount.objects.filter(id=account_id).first()
+        if account and job.job_type == AgentJob.Type.UNSUSPEND_ACCOUNT:
+            account.status = HostingAccount.Status.ACTIVE
+            account.save(update_fields=["status", "updated_at"])
+        elif account and job.job_type == AgentJob.Type.DELETE_ACCOUNT:
+            account.status = HostingAccount.Status.DELETED
+            account.save(update_fields=["status", "updated_at"])
+
+
+def start_local_job_background(job, run=None, account_id=None):
+    runner = str(getattr(settings, "LOCAL_BACKGROUND_JOB_RUNNER", "/usr/local/sbin/ehpanel-local-job-runner") or "").strip()
+    args = [str(job.id)]
+    if run:
+        args.extend(["--run-id", str(run.id)])
+    if account_id:
+        args.extend(["--account-id", str(account_id)])
+
+    if os.name == "posix" and runner and Path(runner).exists():
+        command = [runner, *args]
+        if bool(getattr(settings, "LOCAL_PROVISIONING_SUDO", True)) and hasattr(os, "geteuid") and os.geteuid() != 0:
+            command = ["sudo", "-n", runner, *args]
+        try:
+            completed = subprocess.run(command, text=True, capture_output=True, timeout=15, check=False)
+        except Exception as exc:
+            job.mark_failed("LOCAL_BACKGROUND_START_FAILED", f"No se pudo iniciar el worker local: {exc}", {"runner": runner})
+            return job
+        if completed.returncode != 0:
+            job.mark_failed(
+                "LOCAL_BACKGROUND_START_FAILED",
+                completed.stderr or completed.stdout or "El runner local no pudo iniciar el job.",
+                {"runner": runner, "stdout": completed.stdout, "stderr": completed.stderr, "returncode": completed.returncode},
+            )
+        return job
+
+    log_dir = Path(getattr(settings, "BASE_DIR", Path.cwd())) / "media" / "local-jobs"
+    if os.name == "posix":
+        log_dir = Path("/var/log/ehpanel/local-jobs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_dir / f"{job.id}.log", "ab")
+    command = [sys.executable, "manage.py", "run_local_job", str(job.id), *args[1:]]
+    env = os.environ.copy()
+    if os.environ.get("ENV_FILE"):
+        env["ENV_FILE"] = os.environ["ENV_FILE"]
+    try:
+        subprocess.Popen(
+            command,
+            cwd=str(getattr(settings, "BASE_DIR", Path.cwd())),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=(os.name == "posix"),
+            close_fds=True,
+        )
+        log_file.close()
+    except Exception as exc:
+        log_file.close()
+        job.mark_failed("LOCAL_BACKGROUND_START_FAILED", f"No se pudo iniciar el proceso local: {exc}", {"command": command})
+    return job
+
+
+def dispatch_or_execute_local(job, run=None, account_id=None, background=False):
     if is_local_provisioning_enabled():
         if job.job_type == AgentJob.Type.SERVICE_ACTION and (job.payload or {}).get("action") in {"php_versions", "collect_php_versions"}:
             from .local_metrics import collect_node_telemetry
@@ -165,22 +237,11 @@ def dispatch_or_execute_local(job, run=None, account_id=None):
             )
             return job
 
+        if background:
+            return start_local_job_background(job, run=run, account_id=account_id)
+
         execute_local_job(job)
-        from .services import sync_job_side_effects
-
-        sync_job_side_effects(job)
-        if run:
-            run.sync_from_jobs()
-        elif account_id and job.status == AgentJob.Status.SUCCESS:
-            from .models import HostingAccount
-
-            account = HostingAccount.objects.filter(id=account_id).first()
-            if account and job.job_type == AgentJob.Type.UNSUSPEND_ACCOUNT:
-                account.status = HostingAccount.Status.ACTIVE
-                account.save(update_fields=["status", "updated_at"])
-            elif account and job.job_type == AgentJob.Type.DELETE_ACCOUNT:
-                account.status = HostingAccount.Status.DELETED
-                account.save(update_fields=["status", "updated_at"])
+        sync_local_job_post_effects(job, run=run, account_id=account_id)
         return job
 
     from agents.views import dispatch_job

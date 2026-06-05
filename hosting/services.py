@@ -304,9 +304,16 @@ def queue_agent_job(run, order, name, job_type, payload):
     return job
 
 
-def queue_account_job(account, job_type, payload):
+def queue_account_job(account, job_type, payload, background=False):
     job = AgentJob.objects.create(node=account.node, job_type=job_type, payload=payload)
-    transaction.on_commit(lambda job_id=job.id, account_id=account.id: dispatch_or_execute_local(AgentJob.objects.get(id=job_id), account_id=account_id), robust=True)
+    transaction.on_commit(
+        lambda job_id=job.id, account_id=account.id, run_background=background: dispatch_or_execute_local(
+            AgentJob.objects.get(id=job_id),
+            account_id=account_id,
+            background=run_background,
+        ),
+        robust=True,
+    )
     return job
 
 
@@ -2671,7 +2678,7 @@ def import_mailbox(account, data):
         "source_timeout": int(data.get("source_timeout") or 30),
         "source_folder_separator": data.get("source_folder_separator") or "",
     }
-    job = queue_account_job(account, AgentJob.Type.IMPORT_MAILBOX, payload)
+    job = queue_account_job(account, AgentJob.Type.IMPORT_MAILBOX, payload, background=True)
     return mailbox, job
 
 
