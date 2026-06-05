@@ -2845,6 +2845,12 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
         root = Path(root)
         warnings = []
         package_files = [path for path in root.rglob("package.json") if "node_modules" not in path.parts and ".venv" not in path.parts]
+        package_infos = []
+        for package_file in package_files:
+            package = HostingAdvancedItemViewSet._read_json_file(package_file)
+            deps = {**(package.get("dependencies") or {}), **(package.get("devDependencies") or {})}
+            scripts = package.get("scripts") or {}
+            package_infos.append({"path": package_file.parent, "package": package, "deps": deps, "scripts": scripts})
         manage_files = [path for path in root.rglob("manage.py") if ".venv" not in path.parts and "node_modules" not in path.parts]
         backend_dir = root
         frontend_dir = None
@@ -2860,13 +2866,12 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
             project_module = django_settings_module.rsplit(".", 1)[0] if django_settings_module else ""
 
         frontend_candidates = []
-        for package_file in package_files:
-            package_dir = package_file.parent
+        for info in package_infos:
+            package_dir = info["path"]
             if runtime == "django" and package_dir == backend_dir:
                 continue
-            package = HostingAdvancedItemViewSet._read_json_file(package_file)
-            deps = {**(package.get("dependencies") or {}), **(package.get("devDependencies") or {})}
-            scripts = package.get("scripts") or {}
+            deps = info["deps"]
+            scripts = info["scripts"]
             score = 0
             if any(dep in deps for dep in ["vite", "@vitejs/plugin-react", "@vitejs/plugin-vue", "react", "vue"]):
                 score += 5
@@ -2880,8 +2885,26 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
             frontend_candidates.sort(key=lambda item: (-item[0], len(item[1].relative_to(root).parts)))
             frontend_dir = frontend_candidates[0][1]
 
-        if runtime == "node" and package_files:
-            backend_dir = sorted(package_files, key=lambda item: len(item.relative_to(root).parts))[0].parent
+        if runtime == "node" and package_infos:
+            backend_candidates = []
+            for info in package_infos:
+                package_dir = info["path"]
+                deps = info["deps"]
+                scripts = info["scripts"]
+                score = 0
+                if any(dep in deps for dep in ["express", "fastify", "koa", "hapi", "@nestjs/core", "prisma", "sequelize", "typeorm", "mongoose"]):
+                    score += 6
+                if "start" in scripts:
+                    score += 3
+                if "build" in scripts:
+                    score += 1
+                if re.search(r"(api|backend|server)", package_dir.name, re.I):
+                    score += 3
+                if package_dir == frontend_dir:
+                    score -= 8
+                backend_candidates.append((score, package_dir))
+            backend_candidates.sort(key=lambda item: (-item[0], len(item[1].relative_to(root).parts)))
+            backend_dir = backend_candidates[0][1]
 
         backend_rel = HostingAdvancedItemViewSet._relative_repo_path(root, backend_dir)
         frontend_rel = HostingAdvancedItemViewSet._relative_repo_path(root, frontend_dir) if frontend_dir else ""
