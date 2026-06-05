@@ -217,17 +217,80 @@ def dovecot_password_hash(password):
     return hashed
 
 
-def write_dovecot_passwd_entry(email, password, home, settings=None):
+def mailbox_quota_bytes(quota_mb):
+    quota_mb = int(quota_mb or 0)
+    return max(0, quota_mb) * 1024 * 1024
+
+
+def write_maildir_quota_file(home, quota_mb):
+    quota_bytes = mailbox_quota_bytes(quota_mb)
+    maildir = Path(home) / "Maildir"
+    maildir.mkdir(parents=True, exist_ok=True)
+    quota_file = maildir / "maildirsize"
+    if quota_bytes > 0:
+        quota_file.write_text(f"{quota_bytes}S\n", encoding="utf-8")
+    elif quota_file.exists():
+        quota_file.unlink()
+    return quota_file
+
+
+def dovecot_extra_fields(quota_mb=None):
+    fields = ["userdb_mail=maildir:~/Maildir"]
+    quota_mb = int(quota_mb or 0)
+    if quota_mb > 0:
+        fields.append(f"userdb_quota_rule=*:storage={quota_mb}M")
+    return " ".join(fields)
+
+
+def write_dovecot_passwd_entry(email, password, home, settings=None, quota_mb=None):
     if not password:
         return False
     passwd_file = dovecot_passwd_path(settings)
     passwd_file.parent.mkdir(parents=True, exist_ok=True)
     uid, gid = system_user_ids("vmail", "vmail")
     password_hash = dovecot_password_hash(password)
-    line = f"{email}:{password_hash}:{uid}:{gid}::{home}::userdb_mail=maildir:~/Maildir"
+    line = f"{email}:{password_hash}:{uid}:{gid}::{home}::{dovecot_extra_fields(quota_mb)}"
     update_dovecot_passwd_file(email, passwd_file, line)
     reload_dovecot()
     return True
+
+
+
+
+def update_dovecot_passwd_quota(email, quota_mb, settings=None):
+    passwd_file = dovecot_passwd_path(settings)
+    if not passwd_file.exists():
+        return False
+    prefix = f"{email}:"
+    changed = False
+    next_lines = []
+    for line in passwd_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.startswith(prefix):
+            next_lines.append(line)
+            continue
+        parts = line.split(":", 7)
+        if len(parts) < 8:
+            next_lines.append(line)
+            continue
+        extra = [field for field in parts[7].split() if not field.startswith("userdb_quota_rule=")]
+        quota_mb_int = int(quota_mb or 0)
+        if quota_mb_int > 0:
+            extra.append(f"userdb_quota_rule=*:storage={quota_mb_int}M")
+        parts[7] = " ".join(extra)
+        next_line = ":".join(parts)
+        next_lines.append(next_line)
+        changed = changed or next_line != line
+    if changed:
+        tmp = passwd_file.with_name(f"{passwd_file.name}.tmp")
+        tmp.write_text("\n".join(next_lines) + ("\n" if next_lines else ""), encoding="utf-8")
+        tmp.replace(passwd_file)
+        passwd_file.chmod(0o640)
+        try:
+            shutil.chown(passwd_file, user="root", group="dovecot")
+        except Exception:
+            pass
+        reload_dovecot()
+    return changed
 
 
 def remove_dovecot_passwd_entry(email, settings=None):
@@ -1734,18 +1797,20 @@ def create_mailbox(payload, settings):
     if not settings.get("provision_mail", True):
         return ok(skipped=True, reason="mail_disabled")
     email = payload.get("email") or f"{payload.get('local_part')}@{payload.get('domain')}"
+    quota_mb = int(payload.get("quota_mb") or 0)
     local, domain = email.split("@", 1)
     domain = validate_domain(domain)
     safe_local = safe_mail_local(local)
     home = Path("/var/vmail") / domain / safe_local
     maildir = home / "Maildir"
     maildir.mkdir(parents=True, exist_ok=True)
+    write_maildir_quota_file(home, quota_mb)
     if user_exists("vmail"):
         run(["chown", "-R", "vmail:vmail", str(home)], check=False)
     restore_selinux_context(home)
-    password_synced = write_dovecot_passwd_entry(email, payload.get("password"), home, settings)
+    password_synced = write_dovecot_passwd_entry(email, payload.get("password"), home, settings, quota_mb=quota_mb)
     postfix_synced = register_postfix_mailbox(email, home, settings)
-    return ok(email=email, path=str(maildir), password_synced=password_synced, postfix_synced=postfix_synced)
+    return ok(email=email, path=str(maildir), quota_mb=quota_mb, password_synced=password_synced, postfix_synced=postfix_synced)
 
 
 def mailbox_path(email):
@@ -1769,12 +1834,15 @@ def mailbox_json_job(payload, filename):
 
 def change_mailbox_password(payload, settings):
     email = payload["email"]
+    quota_mb = int(payload.get("quota_mb") or 0)
     base = mailbox_path(email)
     base.mkdir(parents=True, exist_ok=True)
+    if quota_mb > 0:
+        write_maildir_quota_file(base, quota_mb)
     if user_exists("vmail"):
         run(["chown", "-R", "vmail:vmail", str(base)], check=False)
     restore_selinux_context(base)
-    password_synced = write_dovecot_passwd_entry(email, payload.get("password"), base, settings)
+    password_synced = write_dovecot_passwd_entry(email, payload.get("password"), base, settings, quota_mb=quota_mb)
     postfix_synced = register_postfix_mailbox(email, base, settings)
     result = mailbox_json_job(
         {"email": email, "password_set": bool(payload.get("password")), "password_synced": password_synced, "postfix_synced": postfix_synced},
@@ -1785,15 +1853,13 @@ def change_mailbox_password(payload, settings):
 
 def set_mailbox_quota(payload):
     base = mailbox_path(payload["email"])
-    maildir = base / "Maildir"
-    maildir.mkdir(parents=True, exist_ok=True)
     quota_mb = int(payload.get("quota_mb") or 0)
-    if quota_mb > 0:
-        (maildir / "maildirsize").write_text(f"{quota_mb * 1024 * 1024}S\n", encoding="utf-8")
+    quota_file = write_maildir_quota_file(base, quota_mb)
+    dovecot_quota_synced = update_dovecot_passwd_quota(payload["email"], quota_mb)
     if user_exists("vmail"):
         run(["chown", "-R", "vmail:vmail", str(base)], check=False)
     restore_selinux_context(base)
-    return ok(email=payload["email"], quota_mb=quota_mb, path=str(maildir))
+    return ok(email=payload["email"], quota_mb=quota_mb, path=str(quota_file.parent), dovecot_quota_synced=dovecot_quota_synced)
 
 
 def suspend_mailbox(payload, suspended=True):

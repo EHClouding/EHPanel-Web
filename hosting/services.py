@@ -2498,7 +2498,7 @@ def collect_database_size(database):
 
 def change_mailbox_password(mailbox, password):
     store_mailbox_credential(mailbox, password)
-    return queue_account_job(mailbox.account, AgentJob.Type.CHANGE_MAILBOX_PASSWORD, {"email": mailbox.email, "password": password})
+    return queue_account_job(mailbox.account, AgentJob.Type.CHANGE_MAILBOX_PASSWORD, {"email": mailbox.email, "password": password, "quota_mb": mailbox.quota_mb})
 
 
 def suspend_mailbox(mailbox):
