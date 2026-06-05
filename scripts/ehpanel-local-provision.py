@@ -787,7 +787,20 @@ def dns_has_public_answer(domain):
         socket.getaddrinfo(domain, 80, type=socket.SOCK_STREAM)
         return True
     except socket.gaierror:
-        return False
+        pass
+
+    for record_type in ["A", "AAAA"]:
+        url = f"https://cloudflare-dns.com/dns-query?name={domain}&type={record_type}"
+        try:
+            request = urllib.request.Request(url, headers={"Accept": "application/dns-json", "User-Agent": "EHPanel-DNS-Probe/1.0"})
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read(65536).decode("utf-8", errors="replace") or "{}")
+            answers = payload.get("Answer") if isinstance(payload, dict) else []
+            if any(str(answer.get("type")) in {"1", "28"} and str(answer.get("data") or "").strip() for answer in answers or [] if isinstance(answer, dict)):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def verify_acme_http_challenge(domain, webroot):
