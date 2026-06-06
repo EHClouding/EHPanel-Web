@@ -1762,11 +1762,16 @@ class HostingAccountViewSet(viewsets.ModelViewSet):
                     "strategy": git_config.get("strategy", ""),
                     "updated_at": app.updated_at,
                 })
+        git_snapshots = HostingApplicationBackup.objects.select_related("app", "app__domain").filter(
+            app__account=account,
+            app__metadata__advanced_item_id__isnull=False,
+        )[:20]
         return Response({
             "account": HostingAccountSerializer(account, context=self.get_serializer_context()).data,
             "counts": item_counts,
             "items": HostingAdvancedItemSerializer(advanced_items, many=True, context=self.get_serializer_context()).data,
             "apps_with_git": apps_with_git,
+            "git_snapshots": HostingApplicationBackupSerializer(git_snapshots, many=True, context=self.get_serializer_context()).data,
             "recent_jobs": AgentJobSerializer(related_jobs, many=True).data,
             "recent_audit": AuditLogSerializer(account.audit_logs.all()[:20], many=True).data,
         })
@@ -3117,6 +3122,29 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
             "job_status": job.status,
         })
 
+    def _queue_git_snapshot(self, item, reason):
+        app = self._git_app_for_item(item)
+        if not app:
+            return None
+        config = item.config if isinstance(item.config, dict) else {}
+        metadata = app.metadata if isinstance(app.metadata, dict) else {}
+        return queue_app_backup(
+            app,
+            metadata={
+                "snapshot_type": "git_app",
+                "snapshot_reason": reason,
+                "advanced_item_id": item.id,
+                "git_commit": metadata.get("git_commit", ""),
+                "repo_url": (metadata.get("git") or {}).get("repo_url", config.get("repo_url", "")) if isinstance(metadata.get("git"), dict) else config.get("repo_url", ""),
+                "branch": (metadata.get("git") or {}).get("branch", config.get("branch", "main")) if isinstance(metadata.get("git"), dict) else config.get("branch", "main"),
+            },
+            extra_payload={
+                "reason": reason,
+                "config": config,
+                "document_root": config.get("document_root") or "public_html",
+            },
+        )
+
     def _split_transient_advanced_config(self, serializer):
         config = dict(serializer.validated_data.get("config") or {})
         secret_values = {}
@@ -3183,13 +3211,14 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
     def deploy(self, request, pk=None):
         item = self.get_object()
         self._require_git_item(item)
+        snapshot = self._queue_git_snapshot(item, "before_deploy")
         job = self._queue_apply(item, transient_config={"deploy_action": "update"})
         audit_action(
             request,
             AuditLog.Action.ACCOUNT_UPDATED,
             account=item.account,
             target=item,
-            metadata={"advanced_action": "git_deploy", "kind": item.kind, "name": item.name, "job": str(job.id)},
+            metadata={"advanced_action": "git_deploy", "kind": item.kind, "name": item.name, "job": str(job.id), "snapshot": snapshot.id if snapshot else None},
         )
         return self._git_action_response(item, job)
 
@@ -3197,15 +3226,32 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
     def rebuild(self, request, pk=None):
         item = self.get_object()
         self._require_git_item(item)
+        snapshot = self._queue_git_snapshot(item, "before_rebuild")
         job = self._queue_apply(item, transient_config={"deploy_action": "rebuild", "force_rebuild": "true"})
         audit_action(
             request,
             AuditLog.Action.ACCOUNT_UPDATED,
             account=item.account,
             target=item,
-            metadata={"advanced_action": "git_rebuild", "kind": item.kind, "name": item.name, "job": str(job.id)},
+            metadata={"advanced_action": "git_rebuild", "kind": item.kind, "name": item.name, "job": str(job.id), "snapshot": snapshot.id if snapshot else None},
         )
         return self._git_action_response(item, job)
+
+    @action(detail=True, methods=["post"], url_path="snapshot")
+    def snapshot(self, request, pk=None):
+        item = self.get_object()
+        self._require_git_item(item)
+        snapshot = self._queue_git_snapshot(item, "manual")
+        if not snapshot:
+            raise ValidationError({"snapshot": "No hay una aplicacion Git activa para crear snapshot."})
+        audit_action(
+            request,
+            AuditLog.Action.ACCOUNT_UPDATED,
+            account=item.account,
+            target=item,
+            metadata={"advanced_action": "git_snapshot", "kind": item.kind, "name": item.name, "snapshot": snapshot.id},
+        )
+        return Response({"snapshot": HostingApplicationBackupSerializer(snapshot, context=self.get_serializer_context()).data}, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=["get"], url_path="logs")
     def logs(self, request, pk=None):
@@ -3220,10 +3266,60 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
             "app": HostingApplicationSerializer(app, context=self.get_serializer_context()).data if app else None,
             "job": AgentJobSerializer(job).data if job else None,
             "outputs": result.get("outputs") if isinstance(result.get("outputs"), list) else [],
+            "snapshots": HostingApplicationBackupSerializer(app.backups.all()[:10], many=True, context=self.get_serializer_context()).data if app else [],
             "last_git_commit": metadata.get("git_commit", ""),
             "frontend_backup_dir": metadata.get("frontend_backup_dir", ""),
             "rollback_available": bool(metadata.get("frontend_backup_dir")),
         })
+
+    @action(detail=True, methods=["post"], url_path="restore-snapshot")
+    def restore_snapshot(self, request, pk=None):
+        from .local_provisioning import dispatch_or_execute_local
+
+        item = self.get_object()
+        self._require_git_item(item)
+        app = self._git_app_for_item(item)
+        if not app:
+            raise ValidationError({"snapshot": "No hay una aplicacion Git activa para restaurar."})
+        backup_id = request.data.get("backup_id")
+        backup = app.backups.filter(id=backup_id, status=HostingApplicationBackup.Status.COMPLETED).first()
+        if not backup:
+            raise ValidationError({"backup_id": "Snapshot no encontrado o aun no completado."})
+        metadata = app.metadata if isinstance(app.metadata, dict) else {}
+        item.status = HostingAdvancedItem.Status.PENDING
+        item.save(update_fields=["status", "updated_at"])
+        app.status = HostingApplication.Status.INSTALLING
+        app.save(update_fields=["status", "updated_at"])
+        job = AgentJob.objects.create(
+            node=item.account.node,
+            job_type=AgentJob.Type.SERVICE_ACTION,
+            payload={
+                "action": "restore_app_snapshot",
+                "item_id": item.id,
+                "app_id": app.id,
+                "backup_id": backup.id,
+                "account_id": str(item.account_id),
+                "username": item.account.username,
+                "domain": app.domain.domain if app.domain else item.account.primary_domain,
+                "instance_id": metadata.get("instance_id") or f"git-{item.id}",
+                "install_path": app.install_path,
+                "archive_path": backup.archive_path,
+                "restore_database": self._truthy(request.data.get("restore_database", True)),
+            },
+        )
+        item.last_job = job
+        item.save(update_fields=["last_job", "updated_at"])
+        app.last_job = job
+        app.save(update_fields=["last_job", "updated_at"])
+        dispatch_or_execute_local(job)
+        audit_action(
+            request,
+            AuditLog.Action.ACCOUNT_UPDATED,
+            account=item.account,
+            target=item,
+            metadata={"advanced_action": "git_snapshot_restore", "kind": item.kind, "name": item.name, "snapshot": backup.id, "job": str(job.id)},
+        )
+        return self._git_action_response(item, job)
 
     @action(detail=True, methods=["post"], url_path="rollback")
     def rollback(self, request, pk=None):

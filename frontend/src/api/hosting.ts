@@ -675,6 +675,7 @@ export type AdvancedSummaryResponse = {
   counts: Record<HostingAdvancedKind, number>
   items: HostingAdvancedItem[]
   apps_with_git: Array<{ app_id: number; app_name: string; app_type: string; repo_url: string; branch: string; strategy?: string; updated_at?: string }>
+  git_snapshots?: HostingApplicationBackup[]
   recent_jobs: AgentJob[]
   recent_audit: Array<Record<string, unknown>>
 }
@@ -696,6 +697,7 @@ export type GitDeployLogs = {
   last_git_commit: string
   outputs: Array<{ returncode?: number; stderr_tail?: string; stdout_tail?: string; step?: string }>
   rollback_available: boolean
+  snapshots?: HostingApplicationBackup[]
 }
 
 export type HomeDashboardSummary = {
@@ -1651,6 +1653,7 @@ export type HostingApplicationBackup = {
   archive_path: string
   filename: string
   size_bytes: number
+  metadata: Record<string, unknown>
   error_code: string
   error_detail: string
   created_at: string
@@ -2202,6 +2205,18 @@ export const hostingApi = {
   rollbackAdvancedItem: (id: number) =>
     apiFetch<{ item: HostingAdvancedItem; job: string; job_status: AgentJob["status"] }>(`/hosting/advanced-items/${id}/rollback/`, {
       body: JSON.stringify({}),
+      method: "POST",
+    }),
+
+  snapshotAdvancedItem: (id: number) =>
+    apiFetch<{ snapshot: HostingApplicationBackup }>(`/hosting/advanced-items/${id}/snapshot/`, {
+      body: JSON.stringify({}),
+      method: "POST",
+    }),
+
+  restoreAdvancedItemSnapshot: (id: number, payload: { backup_id: number; restore_database?: boolean }) =>
+    apiFetch<{ item: HostingAdvancedItem; job: string; job_status: AgentJob["status"] }>(`/hosting/advanced-items/${id}/restore-snapshot/`, {
+      body: JSON.stringify(payload),
       method: "POST",
     }),
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import io
 import imaplib
 import os
 import re
@@ -1603,6 +1604,256 @@ def rollback_git_frontend(payload, settings):
     )
 
 
+def parse_env_file(path):
+    values = {}
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip().strip('"').strip("'")
+        values[key.strip()] = value
+    return values
+
+
+def db_name_from_url(value):
+    parsed = urlparse(str(value or ""))
+    name = parsed.path.strip("/").split("/", 1)[0]
+    return name if SAFE_DB.match(name or "") else ""
+
+
+def snapshot_database_info(payload, app_dir, metadata):
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    engine = str(payload.get("database_engine") or metadata.get("database_engine") or config.get("database_engine") or "").lower()
+    db_name = str(payload.get("database") or payload.get("db_name") or metadata.get("database") or metadata.get("db_name") or config.get("db_name") or "").strip()
+    env_candidates = []
+    backend_dir = metadata.get("backend_dir") or config.get("backend_dir") or ""
+    if backend_dir:
+        backend_path = Path(str(backend_dir))
+        if not backend_path.is_absolute():
+            backend_path = app_dir / str(backend_dir).strip("/")
+        env_candidates.append(backend_path / ".env")
+    env_candidates.append(app_dir / ".env")
+    for env_file in env_candidates:
+        env_values = parse_env_file(env_file)
+        if not db_name:
+            db_name = env_values.get("DB_NAME") or db_name_from_url(env_values.get("DATABASE_URL"))
+        if not engine and env_values.get("DATABASE_URL", "").startswith("postgres"):
+            engine = "postgresql"
+        if not engine and env_values.get("DATABASE_URL", "").startswith(("mysql", "mariadb")):
+            engine = "mariadb"
+    if not engine and db_name:
+        engine = "postgresql"
+    if db_name and not SAFE_DB.match(db_name):
+        db_name = ""
+    return engine, db_name
+
+
+def add_json_to_tar(archive, name, data):
+    raw = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+    info = tarfile.TarInfo(name)
+    info.size = len(raw)
+    info.mtime = int(time.time())
+    archive.addfile(info, io.BytesIO(raw))
+
+
+def should_skip_snapshot_path(path):
+    return any(part in {".git", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache"} for part in Path(path).parts)
+
+
+def add_tree_snapshot(archive, source, arcname):
+    source = Path(source)
+    if not source.exists():
+        return False
+    for item in source.rglob("*"):
+        if should_skip_snapshot_path(item.relative_to(source)):
+            continue
+        archive.add(item, arcname=str(Path(arcname) / item.relative_to(source)), recursive=False)
+    return True
+
+
+def dump_snapshot_database(engine, db_name, target):
+    if not db_name:
+        return {"included": False}
+    if engine in {"postgresql", "postgres"}:
+        result = run(["runuser", "-u", "postgres", "--", "pg_dump", "-Fc", "-f", str(target), db_name], check=False)
+        return {"included": result["returncode"] == 0, "engine": "postgresql", "database": db_name, "error": (result.get("stderr") or result.get("stdout") or "")[-1000:]}
+    if engine in {"mysql", "mariadb"}:
+        result = run(["bash", "-lc", f"mysqldump {shell_quote(db_name)} > {shell_quote(str(target))}"], check=False)
+        return {"included": result["returncode"] == 0, "engine": "mariadb", "database": db_name, "error": (result.get("stderr") or result.get("stdout") or "")[-1000:]}
+    return {"included": False, "engine": engine, "database": db_name, "error": "Motor de base de datos no soportado para snapshot."}
+
+
+def backup_app(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    instance_id = validate_instance_id(payload.get("instance_id") or metadata.get("instance_id") or f"app-{payload.get('app_id') or 'snapshot'}")
+    home = (Path(settings["home_root"]) / username).resolve(strict=False)
+    install_path = payload.get("install_path") or metadata.get("install_path") or metadata.get("backend_dir") or ""
+    app_dir = Path(str(install_path)).resolve(strict=False) if str(install_path).startswith("/") else (home / str(install_path).strip("/")).resolve(strict=False)
+    if os.path.commonpath([str(home), str(app_dir)]) != str(home):
+        raise ValueError("Ruta de aplicacion fuera de la cuenta.")
+
+    snapshot_root = home / ".ehpanel" / "app-snapshots"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    timestamp = int(time.time())
+    archive_path = snapshot_root / f"{instance_id}-{payload.get('backup_id') or timestamp}.tar.gz"
+    db_tmp = snapshot_root / f".{instance_id}-{timestamp}.db"
+
+    git_commit = ""
+    if (app_dir / ".git").exists():
+        commit_result = run_account_shell(username, "git rev-parse --short HEAD", app_dir, check=False)
+        git_commit = (commit_result.get("stdout") or "").strip() if commit_result["returncode"] == 0 else ""
+
+    public_dir_value = metadata.get("frontend_public_dir") or payload.get("public_dir") or ""
+    public_dir = Path(str(public_dir_value)).resolve(strict=False) if public_dir_value else account_document_root(username, settings, payload.get("document_root") or "public_html")
+    if os.path.commonpath([str(home), str(public_dir)]) != str(home):
+        raise ValueError("Ruta publica fuera de la cuenta.")
+
+    engine, db_name = snapshot_database_info(payload, app_dir, metadata)
+    db_snapshot = dump_snapshot_database(engine, db_name, db_tmp)
+    manifest = {
+        "schema": "ehpanel-app-snapshot-v1",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "app_id": payload.get("app_id"),
+        "backup_id": payload.get("backup_id"),
+        "app_type": payload.get("app_type"),
+        "instance_id": instance_id,
+        "install_path": str(app_dir),
+        "public_dir": str(public_dir),
+        "git_commit": git_commit,
+        "database": {key: value for key, value in db_snapshot.items() if key != "error"},
+        "reason": payload.get("reason") or "manual",
+    }
+
+    with tarfile.open(archive_path, "w:gz") as archive:
+        manifest["includes_app"] = add_tree_snapshot(archive, app_dir, "app")
+        manifest["includes_public"] = add_tree_snapshot(archive, public_dir, "public")
+        if db_snapshot.get("included") and db_tmp.exists():
+            archive.add(db_tmp, arcname=f"database/{db_name}.dump")
+        add_json_to_tar(archive, "manifest.json", manifest)
+    db_tmp.unlink(missing_ok=True)
+    archive_path.chmod(0o600)
+    run(["chown", f"{username}:{username}", str(archive_path)], check=False)
+    size = archive_path.stat().st_size
+    return ok(
+        app_id=payload.get("app_id"),
+        backup_id=payload.get("backup_id"),
+        archive_path=str(archive_path),
+        filename=archive_path.name,
+        size_bytes=size,
+        snapshot={**manifest, "database_error": db_snapshot.get("error", "") if not db_snapshot.get("included") else ""},
+    )
+
+
+def safe_extract_tar(archive, destination):
+    destination = Path(destination).resolve(strict=False)
+    for member in archive.getmembers():
+        target = (destination / member.name).resolve(strict=False)
+        if os.path.commonpath([str(destination), str(target)]) != str(destination):
+            raise ValueError("Snapshot contiene rutas invalidas.")
+    archive.extractall(destination)
+
+
+def copy_snapshot_tree(source, destination, username, preserve=()):
+    source = Path(source)
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    preserved = set(preserve)
+    for item in destination.iterdir():
+        if item.name in preserved:
+            continue
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+    if source.exists():
+        for item in source.iterdir():
+            target = destination / item.name
+            if item.is_dir():
+                shutil.copytree(item, target)
+            else:
+                shutil.copy2(item, target)
+    chown_account(username, destination)
+
+
+def restore_snapshot_database(manifest, extract_dir):
+    db_info = manifest.get("database") if isinstance(manifest.get("database"), dict) else {}
+    if not db_info.get("included"):
+        return {"restored": False}
+    db_name = str(db_info.get("database") or "")
+    engine = str(db_info.get("engine") or "")
+    if not SAFE_DB.match(db_name):
+        return {"restored": False, "error": "Nombre de base de datos invalido en snapshot."}
+    dump_file = next((extract_dir / "database").glob("*.dump"), None)
+    if not dump_file:
+        return {"restored": False, "error": "El dump de base de datos no existe en el snapshot."}
+    if engine == "postgresql":
+        result = run(["runuser", "-u", "postgres", "--", "pg_restore", "--clean", "--if-exists", "-d", db_name, str(dump_file)], check=False)
+        return {"restored": result["returncode"] == 0, "engine": engine, "database": db_name, "error": (result.get("stderr") or result.get("stdout") or "")[-1000:]}
+    if engine == "mariadb":
+        result = run(["bash", "-lc", f"mysql {shell_quote(db_name)} < {shell_quote(str(dump_file))}"], check=False)
+        return {"restored": result["returncode"] == 0, "engine": engine, "database": db_name, "error": (result.get("stderr") or result.get("stdout") or "")[-1000:]}
+    return {"restored": False, "engine": engine, "database": db_name, "error": "Motor de base de datos no soportado para restaurar."}
+
+
+def restore_app_snapshot(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    home = (Path(settings["home_root"]) / username).resolve(strict=False)
+    archive_path = Path(str(payload.get("archive_path") or "")).resolve(strict=False)
+    if os.path.commonpath([str(home), str(archive_path)]) != str(home):
+        raise ValueError("Snapshot fuera de la cuenta.")
+    if not archive_path.exists() or not archive_path.is_file():
+        raise ValueError("El archivo de snapshot no existe.")
+    extract_dir = home / ".ehpanel" / "restore-tmp" / f"restore-{secrets.token_hex(6)}"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            safe_extract_tar(archive, extract_dir)
+        manifest = json.loads((extract_dir / "manifest.json").read_text(encoding="utf-8"))
+        app_dir = Path(str(manifest.get("install_path") or payload.get("install_path") or "")).resolve(strict=False)
+        public_dir = Path(str(manifest.get("public_dir") or "")).resolve(strict=False)
+        for target in [app_dir, public_dir]:
+            if os.path.commonpath([str(home), str(target)]) != str(home):
+                raise ValueError("Snapshot apunta a rutas fuera de la cuenta.")
+
+        instance_id = validate_instance_id(payload.get("instance_id") or manifest.get("instance_id") or f"app-{payload.get('app_id') or 'restore'}")
+        service = app_service_name(instance_id)
+        run(["systemctl", "stop", service], check=False)
+        git_commit = str(manifest.get("git_commit") or "").strip()
+        if git_commit and (app_dir / ".git").exists():
+            run_account_shell(username, f"git reset --hard {shell_quote(git_commit)} && git clean -fd", app_dir, check=False)
+        elif (extract_dir / "app").exists():
+            copy_snapshot_tree(extract_dir / "app", app_dir, username)
+        if (extract_dir / "app").exists() and not (app_dir / ".git").exists():
+            copy_snapshot_tree(extract_dir / "app", app_dir, username)
+        if (extract_dir / "public").exists():
+            copy_snapshot_tree(extract_dir / "public", public_dir, username, preserve=(".well-known",))
+        db_restore = restore_snapshot_database(manifest, extract_dir) if truthy(payload.get("restore_database", True)) else {"restored": False}
+        run(["systemctl", "start", service], check=False)
+        nginx_test = run(["nginx", "-t"], check=False)
+        if nginx_test["returncode"] == 0:
+            run(["systemctl", "reload", "nginx"], check=False)
+        run(["systemctl", "restart", "lshttpd"], check=False)
+        return ok(
+            app_id=payload.get("app_id"),
+            backup_id=payload.get("backup_id"),
+            runtime="app_snapshot_restore",
+            restored_from=str(archive_path),
+            git_commit=git_commit,
+            database=db_restore,
+            service=service,
+        )
+    finally:
+        shutil.rmtree(extract_dir, ignore_errors=True)
+
+
 def write_spa_fallback(public_dir, username):
     public_dir = Path(public_dir)
     htaccess = public_dir / ".htaccess"
@@ -3022,6 +3273,8 @@ def service_action(payload, settings=None):
         return apply_advanced_item(payload, settings or {})
     if str(payload.get("action") or "").strip() == "rollback_git_app":
         return rollback_git_frontend(payload, settings or {})
+    if str(payload.get("action") or "").strip() == "restore_app_snapshot":
+        return restore_app_snapshot(payload, settings or {})
 
     service = str(payload.get("service") or "").strip()
     action = str(payload.get("action") or "").strip()
@@ -3880,6 +4133,8 @@ def main():
             return deploy_node_app(payload, settings)
         if job_type == "deploy_git_app":
             return deploy_git_app(payload, settings)
+        if job_type == "backup_app":
+            return backup_app(payload, settings)
         if job_type == "deploy_django_app":
             return deploy_django_app(payload, settings)
         if job_type == "deploy_laravel_app":

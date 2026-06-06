@@ -1,7 +1,9 @@
 import {
   Activity,
+  Archive,
   Database,
   GitBranch,
+  History,
   KeyRound,
   Plus,
   RefreshCcw,
@@ -16,7 +18,7 @@ import {
 import type { ReactNode } from "react"
 import { useEffect, useMemo, useState } from "react"
 
-import { hostingApi, type AdvancedSummaryResponse, type GitDeployDetection, type GitDeployLogs, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind } from "@/api/hosting"
+import { hostingApi, type AdvancedSummaryResponse, type GitDeployDetection, type GitDeployLogs, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind, type HostingApplicationBackup } from "@/api/hosting"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -144,15 +146,17 @@ export function AdvancedPage() {
     await loadSummary()
   }
 
-  async function runGitDeployAction(item: HostingAdvancedItem, action: "deploy" | "rebuild" | "rollback") {
+  async function runGitDeployAction(item: HostingAdvancedItem, action: "deploy" | "rebuild" | "rollback" | "snapshot") {
     if (action === "rebuild" && !window.confirm(`Rebuild completo de "${item.name}"? Se reinstalaran dependencias y se volvera a compilar.`)) return
     if (action === "rollback" && !window.confirm(`Restaurar el frontend anterior de "${item.name}"? EHPanel guardara backup del estado actual antes de restaurar.`)) return
+    if (action === "snapshot" && !window.confirm(`Crear snapshot de "${item.name}"? Se guardara version de app, frontend publicado y base de datos si EHPanel la detecta.`)) return
     setGitActionLoading(`${action}:${item.id}`)
     setError("")
     try {
       if (action === "deploy") await hostingApi.deployAdvancedItem(item.id)
       if (action === "rebuild") await hostingApi.rebuildAdvancedItem(item.id)
       if (action === "rollback") await hostingApi.rollbackAdvancedItem(item.id)
+      if (action === "snapshot") await hostingApi.snapshotAdvancedItem(item.id)
       await loadSummary()
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo ejecutar la accion Git.")
@@ -168,6 +172,21 @@ export function AdvancedPage() {
       setGitLogs(await hostingApi.advancedItemLogs(item.id))
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudieron cargar los logs.")
+    } finally {
+      setGitActionLoading("")
+    }
+  }
+
+  async function restoreGitSnapshot(item: HostingAdvancedItem, snapshot: HostingApplicationBackup) {
+    const dbText = snapshot.metadata?.database && typeof snapshot.metadata.database === "object" && (snapshot.metadata.database as Record<string, unknown>).included ? " Incluye restauracion de base de datos." : ""
+    if (!window.confirm(`Restaurar "${item.name}" al snapshot ${snapshot.filename || snapshot.id}?${dbText}`)) return
+    setGitActionLoading(`restore:${item.id}`)
+    setError("")
+    try {
+      await hostingApi.restoreAdvancedItemSnapshot(item.id, { backup_id: snapshot.id, restore_database: true })
+      await loadSummary()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo restaurar el snapshot.")
     } finally {
       setGitActionLoading("")
     }
@@ -255,6 +274,8 @@ export function AdvancedPage() {
               onLogs={(item) => void openGitLogs(item)}
               onRebuild={(item) => void runGitDeployAction(item, "rebuild")}
               onRollback={(item) => void runGitDeployAction(item, "rollback")}
+              onSnapshot={(item) => void runGitDeployAction(item, "snapshot")}
+              onSnapshotRestore={(item, snapshot) => void restoreGitSnapshot(item, snapshot)}
               onToggle={toggleItem}
               search={search}
               setSearch={setSearch}
@@ -302,6 +323,8 @@ function GitDeployTab({
   onLogs,
   onRebuild,
   onRollback,
+  onSnapshot,
+  onSnapshotRestore,
   onToggle,
   search,
   setSearch,
@@ -316,6 +339,8 @@ function GitDeployTab({
   onLogs: (item: HostingAdvancedItem) => void
   onRebuild: (item: HostingAdvancedItem) => void
   onRollback: (item: HostingAdvancedItem) => void
+  onSnapshot: (item: HostingAdvancedItem) => void
+  onSnapshotRestore: (item: HostingAdvancedItem, snapshot: HostingApplicationBackup) => void
   onToggle: (item: HostingAdvancedItem) => void
   search: string
   setSearch: (value: string) => void
@@ -358,10 +383,12 @@ function GitDeployTab({
             onLogs={onLogs}
             onRebuild={onRebuild}
             onRollback={onRollback}
+            onSnapshot={onSnapshot}
             onToggle={onToggle}
           />,
         ])}
       />
+      <GitDeploySnapshots items={items} snapshots={summary?.git_snapshots || []} onRestore={onSnapshotRestore} />
     </div>
   )
 }
@@ -386,6 +413,7 @@ function GitDeployActions({
   onLogs,
   onRebuild,
   onRollback,
+  onSnapshot,
   onToggle,
 }: {
   actionLoading: string
@@ -395,6 +423,7 @@ function GitDeployActions({
   onLogs: (item: HostingAdvancedItem) => void
   onRebuild: (item: HostingAdvancedItem) => void
   onRollback: (item: HostingAdvancedItem) => void
+  onSnapshot: (item: HostingAdvancedItem) => void
   onToggle: (item: HostingAdvancedItem) => void
 }) {
   const busy = actionLoading.endsWith(`:${item.id}`)
@@ -407,6 +436,10 @@ function GitDeployActions({
       <Button disabled={busy || !item.enabled} onClick={() => onRebuild(item)} size="sm" title="Reinstala dependencias, recompila y publica de nuevo" variant="outline">
         <Rocket className="h-4 w-4" />
         Rebuild
+      </Button>
+      <Button disabled={busy || !item.enabled} onClick={() => onSnapshot(item)} size="sm" title="Guarda version de app, frontend y base de datos si se detecta" variant="outline">
+        <Archive className="h-4 w-4" />
+        Snapshot
       </Button>
       <Button disabled={busy} onClick={() => onLogs(item)} size="sm" title="Ver salida del ultimo job" variant="outline">
         <Terminal className="h-4 w-4" />
@@ -426,6 +459,69 @@ function GitDeployActions({
       </Button>
     </div>
   )
+}
+
+function GitDeploySnapshots({ items, snapshots, onRestore }: { items: HostingAdvancedItem[]; snapshots: HostingApplicationBackup[]; onRestore: (item: HostingAdvancedItem, snapshot: HostingApplicationBackup) => void }) {
+  const itemById = new Map(items.map((item) => [item.id, item]))
+  const rows = snapshots.slice(0, 10).map((snapshot) => {
+    const itemId = Number(snapshot.metadata?.advanced_item_id || 0)
+    const item = itemById.get(itemId)
+    const database = snapshot.metadata?.database && typeof snapshot.metadata.database === "object" ? snapshot.metadata.database as Record<string, unknown> : {}
+    return [
+      <div className="flex items-center gap-2" key={`name-${snapshot.id}`}>
+        <History className="h-4 w-4 text-blue-700" />
+        <div>
+          <div className="font-bold text-slate-800">{item?.name || snapshot.app_name}</div>
+          <div className="text-xs text-slate-500">{snapshotReason(snapshot.metadata?.snapshot_reason)} · {String(snapshot.metadata?.git_commit || "sin commit")}</div>
+        </div>
+      </div>,
+      formatDate(snapshot.created_at),
+      <SnapshotCoverage key={`coverage-${snapshot.id}`} app={Boolean(snapshot.metadata?.includes_app)} frontend={Boolean(snapshot.metadata?.includes_public)} database={Boolean(database.included)} />,
+      formatBytes(snapshot.size_bytes),
+      <StatusBadge enabled status={snapshot.status} />,
+      item ? (
+        <Button disabled={snapshot.status !== "completed"} key={`restore-${snapshot.id}`} onClick={() => onRestore(item, snapshot)} size="sm" title="Restaurar app, frontend y base de datos si el snapshot la incluye" variant="outline">
+          <RotateCcw className="h-4 w-4" />
+          Restaurar
+        </Button>
+      ) : "-",
+    ]
+  })
+  return (
+    <div className="space-y-2">
+      <div>
+        <h3 className="text-sm font-black text-slate-900">Versiones de la app</h3>
+        <p className="text-xs font-medium text-slate-500">EHPanel crea snapshots antes de actualizar o reconstruir. Tambien puedes crearlos manualmente con el boton Snapshot.</p>
+      </div>
+      <SimpleTable
+        columns={["Snapshot", "Fecha", "Incluye", "Tamano", "Estado", "Acciones"]}
+        emptyText="Aun no hay snapshots de apps Git."
+        rows={rows}
+      />
+    </div>
+  )
+}
+
+function SnapshotCoverage({ app, frontend, database }: { app: boolean; frontend: boolean; database: boolean }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      <CoveragePill active={app} label="App" />
+      <CoveragePill active={frontend} label="Frontend" />
+      <CoveragePill active={database} label="BD" />
+    </div>
+  )
+}
+
+function CoveragePill({ active, label }: { active: boolean; label: string }) {
+  return <span className={cn("rounded-md px-2 py-1 text-xs font-black", active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>{label}</span>
+}
+
+function snapshotReason(value: unknown) {
+  const reason = String(value || "")
+  if (reason === "before_deploy") return "Antes de actualizar"
+  if (reason === "before_rebuild") return "Antes de rebuild"
+  if (reason === "manual") return "Manual"
+  return "Snapshot"
 }
 
 function WorkflowStep({ icon: Icon, label, text }: { icon: typeof GitBranch; label: string; text: string }) {
@@ -961,4 +1057,17 @@ function formatDate(value?: string | null) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return "-"
   return date.toLocaleString("es-BO", { dateStyle: "medium", timeStyle: "short" })
+}
+
+function formatBytes(value?: number | null) {
+  const bytes = Number(value || 0)
+  if (!bytes) return "-"
+  const units = ["B", "KB", "MB", "GB"]
+  let size = bytes
+  let index = 0
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024
+    index += 1
+  }
+  return `${size.toFixed(index ? 1 : 0)} ${units[index]}`
 }

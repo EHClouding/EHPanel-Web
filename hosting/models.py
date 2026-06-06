@@ -1294,6 +1294,7 @@ class HostingApplicationBackup(models.Model):
     archive_path = models.CharField(max_length=500, blank=True)
     filename = models.CharField(max_length=180, blank=True)
     size_bytes = models.BigIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
     last_job = models.ForeignKey(AgentJob, null=True, blank=True, on_delete=models.SET_NULL)
     error_code = models.CharField(max_length=80, blank=True)
     error_detail = models.TextField(blank=True)

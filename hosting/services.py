@@ -3597,10 +3597,12 @@ def queue_app_update_check(app):
     return job
 
 
-def queue_app_backup(app):
-    backup = HostingApplicationBackup.objects.create(app=app, status=HostingApplicationBackup.Status.PENDING)
-    metadata = app.metadata or {}
-    instance_id = metadata.get("instance_id") or f"{app.app_type}-{app.id}"
+def queue_app_backup(app, metadata=None, extra_payload=None):
+    backup_metadata = metadata or {}
+    extra_payload = extra_payload or {}
+    backup = HostingApplicationBackup.objects.create(app=app, status=HostingApplicationBackup.Status.PENDING, metadata=backup_metadata)
+    app_metadata = app.metadata or {}
+    instance_id = app_metadata.get("instance_id") or f"{app.app_type}-{app.id}"
     job = queue_account_job(
         app.account,
         AgentJob.Type.BACKUP_APP,
@@ -3608,9 +3610,12 @@ def queue_app_backup(app):
             "app_id": app.id,
             "backup_id": backup.id,
             "username": app.account.username,
+            "domain": app.domain.domain if app.domain else app.account.primary_domain,
             "instance_id": instance_id,
             "install_path": app.install_path,
             "app_type": app.app_type,
+            "metadata": app_metadata,
+            **extra_payload,
         },
     )
     backup.last_job = job
@@ -3762,6 +3767,17 @@ def sync_job_side_effects(job):
                 item.status = HostingAdvancedItem.Status.FAILED
             item.save(update_fields=["status", "last_job", "updated_at"])
 
+    if job.job_type == AgentJob.Type.SERVICE_ACTION and (job.payload or {}).get("action") == "restore_app_snapshot":
+        item_id = (job.payload or {}).get("item_id")
+        item = HostingAdvancedItem.objects.filter(id=item_id).first()
+        if item:
+            item.last_job = job
+            if job.status == AgentJob.Status.SUCCESS:
+                item.status = HostingAdvancedItem.Status.ACTIVE
+            elif job.status == AgentJob.Status.FAILED:
+                item.status = HostingAdvancedItem.Status.FAILED
+            item.save(update_fields=["status", "last_job", "updated_at"])
+
     scan_id = (job.payload or {}).get("scan_id")
     if scan_id and job.job_type == AgentJob.Type.SECURITY_SCAN:
         scan = HostingSecurityScan.objects.filter(id=scan_id).first()
@@ -3824,9 +3840,10 @@ def sync_job_side_effects(job):
                 backup.archive_path = (job.result or {}).get("archive_path", "")
                 backup.filename = (job.result or {}).get("filename", "")
                 backup.size_bytes = int((job.result or {}).get("size_bytes") or 0)
+                backup.metadata = {**(backup.metadata or {}), **((job.result or {}).get("snapshot") or {})}
                 backup.error_code = ""
                 backup.error_detail = ""
-                backup.save(update_fields=["status", "archive_path", "filename", "size_bytes", "error_code", "error_detail", "updated_at"])
+                backup.save(update_fields=["status", "archive_path", "filename", "size_bytes", "metadata", "error_code", "error_detail", "updated_at"])
             elif job.status == AgentJob.Status.FAILED:
                 backup.status = HostingApplicationBackup.Status.FAILED
                 backup.error_code = job.error_code

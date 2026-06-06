@@ -1628,6 +1628,7 @@ class HostingApplicationBackupSerializer(serializers.ModelSerializer):
             "archive_path",
             "filename",
             "size_bytes",
+            "metadata",
             "error_code",
             "error_detail",
             "created_at",
