@@ -3751,6 +3751,17 @@ def sync_job_side_effects(job):
         if job.job_type == AgentJob.Type.SERVICE_ACTION:
             return
 
+    if job.job_type == AgentJob.Type.SERVICE_ACTION and (job.payload or {}).get("action") == "rollback_git_app":
+        item_id = (job.payload or {}).get("item_id")
+        item = HostingAdvancedItem.objects.filter(id=item_id).first()
+        if item:
+            item.last_job = job
+            if job.status == AgentJob.Status.SUCCESS:
+                item.status = HostingAdvancedItem.Status.ACTIVE
+            elif job.status == AgentJob.Status.FAILED:
+                item.status = HostingAdvancedItem.Status.FAILED
+            item.save(update_fields=["status", "last_job", "updated_at"])
+
     scan_id = (job.payload or {}).get("scan_id")
     if scan_id and job.job_type == AgentJob.Type.SECURITY_SCAN:
         scan = HostingSecurityScan.objects.filter(id=scan_id).first()

@@ -1541,6 +1541,67 @@ def copy_frontend_dist(source, public_dir, username):
     return {"public_dir": str(public_dir), "backup_dir": str(backup_dir or "")}
 
 
+def rollback_git_frontend(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    domain = validate_domain(payload.get("domain") or "example.com")
+    home = (Path(settings["home_root"]) / username).resolve(strict=False)
+    backup_dir = Path(str(payload.get("backup_dir") or "")).resolve(strict=False)
+    if os.path.commonpath([str(home), str(backup_dir)]) != str(home):
+        raise ValueError("Backup fuera de la cuenta.")
+    backup_parts = list(backup_dir.parts)
+    if not any(backup_parts[index] == ".ehpanel" and backup_parts[index + 1] == "backups" for index in range(len(backup_parts) - 1)):
+        raise ValueError("Backup no pertenece a EHPanel.")
+    if not backup_dir.exists() or not backup_dir.is_dir():
+        raise ValueError(f"No existe el backup frontend: {backup_dir}")
+
+    public_dir = account_document_root(username, settings, payload.get("document_root") or "public_html")
+    current_backup_dir = ""
+    existing_items = [item for item in public_dir.iterdir() if item.name not in {".well-known"}]
+    if existing_items:
+        current_backup = public_dir.parent / ".ehpanel" / "backups" / f"{public_dir.name}-rollback-{int(time.time())}"
+        current_backup.parent.mkdir(parents=True, exist_ok=True)
+        current_backup.mkdir()
+        for item in existing_items:
+            target = current_backup / item.name
+            if item.is_dir():
+                shutil.copytree(item, target)
+            else:
+                shutil.copy2(item, target)
+        current_backup_dir = str(current_backup)
+
+    for item in public_dir.iterdir():
+        if item.name in {".well-known"}:
+            continue
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+    for item in backup_dir.iterdir():
+        target = public_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+    chown_account(username, public_dir)
+    if current_backup_dir:
+        chown_account(username, Path(current_backup_dir).parent)
+
+    nginx_test = run(["nginx", "-t"], check=False)
+    if nginx_test["returncode"] == 0:
+        run(["systemctl", "reload", "nginx"], check=False)
+    run(["systemctl", "restart", "lshttpd"], check=False)
+    return ok(
+        item_id=payload.get("item_id"),
+        app_id=payload.get("app_id"),
+        runtime="git_frontend_rollback",
+        url=public_url(payload, domain, "/"),
+        frontend_public_dir=str(public_dir),
+        frontend_backup_dir=current_backup_dir,
+        restored_from=str(backup_dir),
+    )
+
+
 def write_spa_fallback(public_dir, username):
     public_dir = Path(public_dir)
     htaccess = public_dir / ".htaccess"
@@ -2957,6 +3018,8 @@ def apply_advanced_item(payload, settings):
 def service_action(payload, settings=None):
     if str(payload.get("action") or "").strip() == "apply_advanced_item":
         return apply_advanced_item(payload, settings or {})
+    if str(payload.get("action") or "").strip() == "rollback_git_app":
+        return rollback_git_frontend(payload, settings or {})
 
     service = str(payload.get("service") or "").strip()
     action = str(payload.get("action") or "").strip()

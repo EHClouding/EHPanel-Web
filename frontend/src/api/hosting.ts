@@ -657,9 +657,15 @@ export type HostingAdvancedItem = {
   masked_config: Record<string, unknown>
   enabled: boolean
   status: "active" | "disabled" | "pending" | "failed"
+  deployed_url?: string
+  git_app_status?: string
+  last_frontend_backup_dir?: string
+  last_git_commit?: string
+  last_job_id?: string
   last_job_status?: AgentJob["status"] | null
   last_error_code?: string | null
   last_error_detail?: string | null
+  rollback_available?: boolean
   created_at: string
   updated_at: string
 }
@@ -680,6 +686,16 @@ export type GitDeployDetection = {
   missing_env_keys: string[]
   summary: Record<string, string>
   warnings: string[]
+}
+
+export type GitDeployLogs = {
+  app: HostingApplication | null
+  frontend_backup_dir: string
+  item: HostingAdvancedItem
+  job: AgentJob | null
+  last_git_commit: string
+  outputs: Array<{ returncode?: number; stderr_tail?: string; stdout_tail?: string; step?: string }>
+  rollback_available: boolean
 }
 
 export type HomeDashboardSummary = {
@@ -2170,6 +2186,27 @@ export const hostingApi = {
       body: JSON.stringify({}),
       method: "POST",
     }),
+
+  deployAdvancedItem: (id: number) =>
+    apiFetch<{ item: HostingAdvancedItem; job: string; job_status: AgentJob["status"] }>(`/hosting/advanced-items/${id}/deploy/`, {
+      body: JSON.stringify({}),
+      method: "POST",
+    }),
+
+  rebuildAdvancedItem: (id: number) =>
+    apiFetch<{ item: HostingAdvancedItem; job: string; job_status: AgentJob["status"] }>(`/hosting/advanced-items/${id}/rebuild/`, {
+      body: JSON.stringify({}),
+      method: "POST",
+    }),
+
+  rollbackAdvancedItem: (id: number) =>
+    apiFetch<{ item: HostingAdvancedItem; job: string; job_status: AgentJob["status"] }>(`/hosting/advanced-items/${id}/rollback/`, {
+      body: JSON.stringify({}),
+      method: "POST",
+    }),
+
+  advancedItemLogs: (id: number) =>
+    apiFetch<GitDeployLogs>(`/hosting/advanced-items/${id}/logs/`),
 
   deleteAdvancedItem: (id: number) =>
     apiFetch<void>(`/hosting/advanced-items/${id}/`, {

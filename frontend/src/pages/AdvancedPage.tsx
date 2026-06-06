@@ -5,6 +5,7 @@ import {
   KeyRound,
   Plus,
   RefreshCcw,
+  RotateCcw,
   Rocket,
   Search,
   Settings2,
@@ -15,7 +16,7 @@ import {
 import type { ReactNode } from "react"
 import { useEffect, useMemo, useState } from "react"
 
-import { hostingApi, type AdvancedSummaryResponse, type GitDeployDetection, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind } from "@/api/hosting"
+import { hostingApi, type AdvancedSummaryResponse, type GitDeployDetection, type GitDeployLogs, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind } from "@/api/hosting"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -94,6 +95,8 @@ export function AdvancedPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [search, setSearch] = useState("")
+  const [gitActionLoading, setGitActionLoading] = useState("")
+  const [gitLogs, setGitLogs] = useState<GitDeployLogs | null>(null)
 
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId) || accounts[0],
@@ -139,6 +142,35 @@ export function AdvancedPage() {
     if (!window.confirm(`Eliminar ${kindLabels[item.kind]} "${item.name}"?`)) return
     await hostingApi.deleteAdvancedItem(item.id)
     await loadSummary()
+  }
+
+  async function runGitDeployAction(item: HostingAdvancedItem, action: "deploy" | "rebuild" | "rollback") {
+    if (action === "rebuild" && !window.confirm(`Rebuild completo de "${item.name}"? Se reinstalaran dependencias y se volvera a compilar.`)) return
+    if (action === "rollback" && !window.confirm(`Restaurar el frontend anterior de "${item.name}"? EHPanel guardara backup del estado actual antes de restaurar.`)) return
+    setGitActionLoading(`${action}:${item.id}`)
+    setError("")
+    try {
+      if (action === "deploy") await hostingApi.deployAdvancedItem(item.id)
+      if (action === "rebuild") await hostingApi.rebuildAdvancedItem(item.id)
+      if (action === "rollback") await hostingApi.rollbackAdvancedItem(item.id)
+      await loadSummary()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo ejecutar la accion Git.")
+    } finally {
+      setGitActionLoading("")
+    }
+  }
+
+  async function openGitLogs(item: HostingAdvancedItem) {
+    setGitActionLoading(`logs:${item.id}`)
+    setError("")
+    try {
+      setGitLogs(await hostingApi.advancedItemLogs(item.id))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudieron cargar los logs.")
+    } finally {
+      setGitActionLoading("")
+    }
   }
 
   useEffect(() => {
@@ -214,10 +246,15 @@ export function AdvancedPage() {
             <VhostManualTab items={items} onAdd={() => setModal("vhost_manual")} onDelete={deleteItem} onToggle={toggleItem} search={search} setSearch={setSearch} />
           ) : activeTab === "Git / Deploy" ? (
             <GitDeployTab
+              actionLoading={gitActionLoading}
               items={items}
               loading={loading}
               onAdd={() => setModal("git_repo")}
               onDelete={deleteItem}
+              onDeploy={(item) => void runGitDeployAction(item, "deploy")}
+              onLogs={(item) => void openGitLogs(item)}
+              onRebuild={(item) => void runGitDeployAction(item, "rebuild")}
+              onRollback={(item) => void runGitDeployAction(item, "rollback")}
               onToggle={toggleItem}
               search={search}
               setSearch={setSearch}
@@ -250,24 +287,35 @@ export function AdvancedPage() {
           }}
         />
       ) : null}
+      {gitLogs ? <GitDeployLogsModal logs={gitLogs} onClose={() => setGitLogs(null)} /> : null}
     </div>
   )
 }
 
 function GitDeployTab({
+  actionLoading,
   items,
   loading,
   onAdd,
   onDelete,
+  onDeploy,
+  onLogs,
+  onRebuild,
+  onRollback,
   onToggle,
   search,
   setSearch,
   summary,
 }: {
+  actionLoading: string
   items: HostingAdvancedItem[]
   loading: boolean
   onAdd: () => void
   onDelete: (item: HostingAdvancedItem) => void
+  onDeploy: (item: HostingAdvancedItem) => void
+  onLogs: (item: HostingAdvancedItem) => void
+  onRebuild: (item: HostingAdvancedItem) => void
+  onRollback: (item: HostingAdvancedItem) => void
   onToggle: (item: HostingAdvancedItem) => void
   search: string
   setSearch: (value: string) => void
@@ -295,16 +343,87 @@ function GitDeployTab({
         />
       ) : null}
       <SimpleTable
-        columns={["Nombre", "Detalle", "Estado", "Actualizado", "Acciones"]}
+        columns={["Nombre", "Detalle", "Estado", "Ultimo deploy", "Acciones"]}
         emptyText="Sin repositorios Git registrados."
         rows={items.map((item) => [
           item.name,
           <ConfigSummary item={item} />,
           <StatusBadge status={item.status} enabled={item.enabled} />,
-          formatDate(item.updated_at),
-          <Actions item={item} onDelete={onDelete} onToggle={onToggle} />,
+          <GitDeployLastRun item={item} />,
+          <GitDeployActions
+            actionLoading={actionLoading}
+            item={item}
+            onDelete={onDelete}
+            onDeploy={onDeploy}
+            onLogs={onLogs}
+            onRebuild={onRebuild}
+            onRollback={onRollback}
+            onToggle={onToggle}
+          />,
         ])}
       />
+    </div>
+  )
+}
+
+function GitDeployLastRun({ item }: { item: HostingAdvancedItem }) {
+  const commit = item.last_git_commit ? `Commit ${item.last_git_commit}` : "Sin commit registrado"
+  const backup = item.rollback_available ? "Rollback disponible" : "Sin backup previo"
+  return (
+    <div className="space-y-1 text-xs">
+      <div className="font-bold text-slate-700">{commit}</div>
+      <div className={cn("font-semibold", item.rollback_available ? "text-emerald-700" : "text-slate-500")}>{backup}</div>
+      <div className="text-slate-500">{formatDate(item.updated_at)}</div>
+    </div>
+  )
+}
+
+function GitDeployActions({
+  actionLoading,
+  item,
+  onDelete,
+  onDeploy,
+  onLogs,
+  onRebuild,
+  onRollback,
+  onToggle,
+}: {
+  actionLoading: string
+  item: HostingAdvancedItem
+  onDelete: (item: HostingAdvancedItem) => void
+  onDeploy: (item: HostingAdvancedItem) => void
+  onLogs: (item: HostingAdvancedItem) => void
+  onRebuild: (item: HostingAdvancedItem) => void
+  onRollback: (item: HostingAdvancedItem) => void
+  onToggle: (item: HostingAdvancedItem) => void
+}) {
+  const busy = actionLoading.endsWith(`:${item.id}`)
+  return (
+    <div className="flex min-w-[420px] flex-wrap justify-end gap-1.5">
+      <Button disabled={busy || !item.enabled} onClick={() => onDeploy(item)} size="sm" title="Trae los cambios del branch y despliega" variant="outline">
+        <RefreshCcw className="h-4 w-4" />
+        Actualizar Git
+      </Button>
+      <Button disabled={busy || !item.enabled} onClick={() => onRebuild(item)} size="sm" title="Reinstala dependencias, recompila y publica de nuevo" variant="outline">
+        <Rocket className="h-4 w-4" />
+        Rebuild
+      </Button>
+      <Button disabled={busy} onClick={() => onLogs(item)} size="sm" title="Ver salida del ultimo job" variant="outline">
+        <Terminal className="h-4 w-4" />
+        Logs
+      </Button>
+      <Button disabled={busy || !item.rollback_available} onClick={() => onRollback(item)} size="sm" title="Restaura el frontend anterior respaldado por EHPanel" variant="outline">
+        <RotateCcw className="h-4 w-4" />
+        Restaurar frontend
+      </Button>
+      <Button disabled={busy} onClick={() => onToggle(item)} size="sm" title={item.enabled ? "Desactivar deploy" : "Activar deploy"} variant="outline">
+        <Settings2 className="h-4 w-4" />
+        {item.enabled ? "Desactivar" : "Activar"}
+      </Button>
+      <Button disabled={busy} onClick={() => onDelete(item)} size="sm" title="Eliminar configuracion Git" variant="outline">
+        <Trash2 className="h-4 w-4" />
+        Eliminar
+      </Button>
     </div>
   )
 }
@@ -476,6 +595,70 @@ function ConfigSummary({ item }: { item: HostingAdvancedItem }) {
     .slice(0, 4)
     .map(([key, value]) => `${labelKey(key)}: ${String(value)}`)
   return <div className="line-clamp-2 text-xs text-slate-600">{pieces.join(" · ") || "Sin detalle adicional"}</div>
+}
+
+function GitDeployLogsModal({ logs, onClose }: { logs: GitDeployLogs; onClose: () => void }) {
+  const job = logs.job
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4">
+      <div className="flex max-h-[92vh] w-full max-w-4xl flex-col rounded-lg bg-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+          <div>
+            <div className="eh-kicker">Git / Deploy</div>
+            <h3 className="mt-1 text-lg font-bold">Logs de {logs.item.name}</h3>
+            <div className="mt-1 text-xs font-semibold text-slate-500">
+              {job ? `${job.job_type} - ${job.status} - ${formatDate(job.updated_at || job.finished_at || job.queued_at || "")}` : "Sin job registrado"}
+            </div>
+          </div>
+          <button className="grid h-8 w-8 place-items-center rounded-md text-slate-500 hover:bg-slate-100" onClick={onClose} type="button">
+            <XCircle className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 overflow-y-auto px-5 py-4">
+          {job?.error_detail ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{job.error_detail}</div> : null}
+          <div className="grid gap-3 md:grid-cols-3">
+            <LogFact label="Commit" value={logs.last_git_commit || "No registrado"} />
+            <LogFact label="Rollback frontend" value={logs.rollback_available ? "Disponible" : "No disponible"} />
+            <LogFact label="URL" value={logs.app?.url || logs.item.deployed_url || "-"} />
+          </div>
+          <div className="space-y-3">
+            {logs.outputs.length ? logs.outputs.map((output, index) => (
+              <div className="rounded-lg border border-slate-200 bg-slate-50" key={`${output.step || "step"}-${index}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
+                  <div className="text-sm font-black text-slate-800">{output.step || `Paso ${index + 1}`}</div>
+                  <StatusBadge enabled status={Number(output.returncode || 0) === 0 ? "active" : "failed"} />
+                </div>
+                <div className="grid gap-3 p-3 md:grid-cols-2">
+                  <LogBlock label="stdout" value={output.stdout_tail || ""} />
+                  <LogBlock label="stderr" value={output.stderr_tail || ""} />
+                </div>
+              </div>
+            )) : (
+              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-6 text-center text-sm font-semibold text-slate-500">Este job no tiene salida detallada guardada.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LogFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+      <div className="text-[11px] font-black uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-1 truncate text-sm font-bold text-slate-800" title={value}>{value}</div>
+    </div>
+  )
+}
+
+function LogBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="mb-1 text-[11px] font-black uppercase tracking-wide text-slate-500">{label}</div>
+      <pre className="max-h-64 overflow-auto rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">{value || "Sin salida"}</pre>
+    </div>
+  )
 }
 
 function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: string; kind: HostingAdvancedKind; onClose: () => void; onSaved: () => void }) {

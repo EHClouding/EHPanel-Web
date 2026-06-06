@@ -3101,6 +3101,22 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
         item.refresh_from_db(fields=["status", "last_job", "updated_at"])
         return job
 
+    @staticmethod
+    def _git_app_for_item(item):
+        return HostingApplication.objects.filter(account=item.account, metadata__advanced_item_id=item.id).order_by("-updated_at").first()
+
+    def _require_git_item(self, item):
+        if item.kind != HostingAdvancedItem.Kind.GIT_REPO:
+            raise ValidationError({"kind": "Esta accion solo aplica a repositorios Git."})
+
+    def _git_action_response(self, item, job):
+        item.refresh_from_db(fields=["status", "last_job", "updated_at"])
+        return Response({
+            "item": self.get_serializer(item).data,
+            "job": str(job.id),
+            "job_status": job.status,
+        })
+
     def _split_transient_advanced_config(self, serializer):
         config = dict(serializer.validated_data.get("config") or {})
         secret_values = {}
@@ -3162,6 +3178,97 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
             metadata={"advanced_action": "toggle", "kind": item.kind, "enabled": item.enabled},
         )
         return Response(self.get_serializer(item).data)
+
+    @action(detail=True, methods=["post"], url_path="deploy")
+    def deploy(self, request, pk=None):
+        item = self.get_object()
+        self._require_git_item(item)
+        job = self._queue_apply(item, transient_config={"deploy_action": "update"})
+        audit_action(
+            request,
+            AuditLog.Action.ACCOUNT_UPDATED,
+            account=item.account,
+            target=item,
+            metadata={"advanced_action": "git_deploy", "kind": item.kind, "name": item.name, "job": str(job.id)},
+        )
+        return self._git_action_response(item, job)
+
+    @action(detail=True, methods=["post"], url_path="rebuild")
+    def rebuild(self, request, pk=None):
+        item = self.get_object()
+        self._require_git_item(item)
+        job = self._queue_apply(item, transient_config={"deploy_action": "rebuild", "force_rebuild": "true"})
+        audit_action(
+            request,
+            AuditLog.Action.ACCOUNT_UPDATED,
+            account=item.account,
+            target=item,
+            metadata={"advanced_action": "git_rebuild", "kind": item.kind, "name": item.name, "job": str(job.id)},
+        )
+        return self._git_action_response(item, job)
+
+    @action(detail=True, methods=["get"], url_path="logs")
+    def logs(self, request, pk=None):
+        item = self.get_object()
+        self._require_git_item(item)
+        app = self._git_app_for_item(item)
+        job = item.last_job or (app.last_job if app else None)
+        metadata = app.metadata if app and isinstance(app.metadata, dict) else {}
+        result = job.result if job and isinstance(job.result, dict) else {}
+        return Response({
+            "item": self.get_serializer(item).data,
+            "app": HostingApplicationSerializer(app, context=self.get_serializer_context()).data if app else None,
+            "job": AgentJobSerializer(job).data if job else None,
+            "outputs": result.get("outputs") if isinstance(result.get("outputs"), list) else [],
+            "last_git_commit": metadata.get("git_commit", ""),
+            "frontend_backup_dir": metadata.get("frontend_backup_dir", ""),
+            "rollback_available": bool(metadata.get("frontend_backup_dir")),
+        })
+
+    @action(detail=True, methods=["post"], url_path="rollback")
+    def rollback(self, request, pk=None):
+        from .local_provisioning import dispatch_or_execute_local
+
+        item = self.get_object()
+        self._require_git_item(item)
+        app = self._git_app_for_item(item)
+        metadata = app.metadata if app and isinstance(app.metadata, dict) else {}
+        backup_dir = str(metadata.get("frontend_backup_dir") or "").strip()
+        if not app or not backup_dir:
+            raise ValidationError({"rollback": "No hay un backup frontend anterior para restaurar."})
+        domain = item.account.domains.filter(domain=item.account.primary_domain).first() or item.account.domains.filter(is_primary=True).first() or item.account.domains.first()
+        config = item.config if isinstance(item.config, dict) else {}
+        item.status = HostingAdvancedItem.Status.PENDING
+        item.save(update_fields=["status", "updated_at"])
+        app.status = HostingApplication.Status.INSTALLING
+        app.save(update_fields=["status", "updated_at"])
+        job = AgentJob.objects.create(
+            node=item.account.node,
+            job_type=AgentJob.Type.SERVICE_ACTION,
+            payload={
+                "action": "rollback_git_app",
+                "item_id": item.id,
+                "app_id": app.id,
+                "account_id": str(item.account_id),
+                "username": item.account.username,
+                "domain": domain.domain if domain else item.account.primary_domain,
+                "backup_dir": backup_dir,
+                "document_root": config.get("document_root") or "public_html",
+            },
+        )
+        item.last_job = job
+        item.save(update_fields=["last_job", "updated_at"])
+        app.last_job = job
+        app.save(update_fields=["last_job", "updated_at"])
+        dispatch_or_execute_local(job)
+        audit_action(
+            request,
+            AuditLog.Action.ACCOUNT_UPDATED,
+            account=item.account,
+            target=item,
+            metadata={"advanced_action": "git_frontend_rollback", "kind": item.kind, "name": item.name, "job": str(job.id)},
+        )
+        return self._git_action_response(item, job)
 
 
 class SupportTicketViewSet(viewsets.ModelViewSet):

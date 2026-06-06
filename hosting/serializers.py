@@ -630,9 +630,15 @@ class HostingAdvancedItemSerializer(serializers.ModelSerializer):
     account_domain = serializers.CharField(source="account.primary_domain", read_only=True)
     account_username = serializers.CharField(source="account.username", read_only=True)
     masked_config = serializers.SerializerMethodField()
+    last_job_id = serializers.SerializerMethodField()
     last_job_status = serializers.CharField(source="last_job.status", read_only=True, allow_null=True)
     last_error_code = serializers.CharField(source="last_job.error_code", read_only=True, allow_blank=True, allow_null=True)
     last_error_detail = serializers.CharField(source="last_job.error_detail", read_only=True, allow_blank=True, allow_null=True)
+    git_app_status = serializers.SerializerMethodField()
+    deployed_url = serializers.SerializerMethodField()
+    last_git_commit = serializers.SerializerMethodField()
+    last_frontend_backup_dir = serializers.SerializerMethodField()
+    rollback_available = serializers.SerializerMethodField()
 
     class Meta:
         model = HostingAdvancedItem
@@ -647,9 +653,15 @@ class HostingAdvancedItemSerializer(serializers.ModelSerializer):
             "masked_config",
             "enabled",
             "status",
+            "last_job_id",
             "last_job_status",
             "last_error_code",
             "last_error_detail",
+            "git_app_status",
+            "deployed_url",
+            "last_git_commit",
+            "last_frontend_backup_dir",
+            "rollback_available",
             "created_at",
             "updated_at",
         ]
@@ -659,9 +671,15 @@ class HostingAdvancedItemSerializer(serializers.ModelSerializer):
             "account_username",
             "masked_config",
             "status",
+            "last_job_id",
             "last_job_status",
             "last_error_code",
             "last_error_detail",
+            "git_app_status",
+            "deployed_url",
+            "last_git_commit",
+            "last_frontend_backup_dir",
+            "rollback_available",
             "created_at",
             "updated_at",
         ]
@@ -684,6 +702,40 @@ class HostingAdvancedItemSerializer(serializers.ModelSerializer):
             if value:
                 masked[f"{key}_configured"] = True
         return masked
+
+    def _git_app(self, obj):
+        if obj.kind != HostingAdvancedItem.Kind.GIT_REPO:
+            return None
+        cache_name = "_ehpanel_git_app"
+        if hasattr(obj, cache_name):
+            return getattr(obj, cache_name)
+        app = HostingApplication.objects.filter(account=obj.account, metadata__advanced_item_id=obj.id).order_by("-updated_at").first()
+        setattr(obj, cache_name, app)
+        return app
+
+    def _git_metadata(self, obj):
+        app = self._git_app(obj)
+        return app.metadata if app and isinstance(app.metadata, dict) else {}
+
+    def get_last_job_id(self, obj):
+        return str(obj.last_job_id or "")
+
+    def get_git_app_status(self, obj):
+        app = self._git_app(obj)
+        return app.status if app else ""
+
+    def get_deployed_url(self, obj):
+        app = self._git_app(obj)
+        return app.url if app else ""
+
+    def get_last_git_commit(self, obj):
+        return str(self._git_metadata(obj).get("git_commit") or "")
+
+    def get_last_frontend_backup_dir(self, obj):
+        return str(self._git_metadata(obj).get("frontend_backup_dir") or "")
+
+    def get_rollback_available(self, obj):
+        return bool(self.get_last_frontend_backup_dir(obj))
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
