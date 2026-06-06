@@ -1416,7 +1416,8 @@ def deploy_git_django_app(payload, settings, app_dir, backend_dir, frontend_dir,
                 health_status = str(response.status)
         except Exception as exc:
             health_status = f"failed: {exc}"
-    commit = command_stdout(["git", "rev-parse", "--short", "HEAD"], cwd=str(app_dir))
+    commit_result = run_account_shell(username, "git rev-parse --short HEAD", app_dir, check=False)
+    commit = (commit_result.get("stdout") or "").strip() if commit_result["returncode"] == 0 else ""
     return ok(
         app_id=payload.get("app_id"),
         item_id=payload.get("item_id"),
@@ -2131,7 +2132,8 @@ def deploy_git_app(payload, settings):
         except Exception as exc:
             health_status = f"failed: {exc}"
 
-    commit = command_stdout(["git", "rev-parse", "--short", "HEAD"], cwd=str(app_dir))
+    commit_result = run_account_shell(username, "git rev-parse --short HEAD", app_dir, check=False)
+    commit = (commit_result.get("stdout") or "").strip() if commit_result["returncode"] == 0 else ""
     return ok(
         app_id=payload.get("app_id"),
         item_id=payload.get("item_id"),
