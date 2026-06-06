@@ -3603,10 +3603,10 @@ def queue_app_backup(app, metadata=None, extra_payload=None):
     backup = HostingApplicationBackup.objects.create(app=app, status=HostingApplicationBackup.Status.PENDING, metadata=backup_metadata)
     app_metadata = app.metadata or {}
     instance_id = app_metadata.get("instance_id") or f"{app.app_type}-{app.id}"
-    job = queue_account_job(
-        app.account,
-        AgentJob.Type.BACKUP_APP,
-        {
+    job = AgentJob.objects.create(
+        node=app.account.node,
+        job_type=AgentJob.Type.BACKUP_APP,
+        payload={
             "app_id": app.id,
             "backup_id": backup.id,
             "username": app.account.username,
@@ -3621,6 +3621,7 @@ def queue_app_backup(app, metadata=None, extra_payload=None):
     backup.last_job = job
     backup.status = HostingApplicationBackup.Status.RUNNING
     backup.save(update_fields=["last_job", "status", "updated_at"])
+    transaction.on_commit(lambda job_id=job.id, account_id=app.account_id: dispatch_or_execute_local(AgentJob.objects.get(id=job_id), account_id=account_id), robust=True)
     return backup
 
 

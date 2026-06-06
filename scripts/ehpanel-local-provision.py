@@ -1703,7 +1703,7 @@ def backup_app(payload, settings):
     snapshot_root.mkdir(parents=True, exist_ok=True)
     timestamp = int(time.time())
     archive_path = snapshot_root / f"{instance_id}-{payload.get('backup_id') or timestamp}.tar.gz"
-    db_tmp = snapshot_root / f".{instance_id}-{timestamp}.db"
+    db_tmp = Path("/tmp") / f"ehpanel-snapshot-{instance_id}-{timestamp}.db"
 
     git_commit = ""
     if (app_dir / ".git").exists():
