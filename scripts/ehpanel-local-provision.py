@@ -860,10 +860,12 @@ def pdns_record_name(zone, name):
     return f"{name}.{zone}"
 
 
-def dns_has_public_answer(domain):
+def resolve_public_dns_addresses(domain):
+    addresses = set()
     try:
-        socket.getaddrinfo(domain, 80, type=socket.SOCK_STREAM)
-        return True
+        for item in socket.getaddrinfo(domain, 80, type=socket.SOCK_STREAM):
+            if item and len(item) >= 5 and item[4]:
+                addresses.add(str(item[4][0]))
     except socket.gaierror:
         pass
 
@@ -874,11 +876,37 @@ def dns_has_public_answer(domain):
             with urllib.request.urlopen(request, timeout=8) as response:
                 payload = json.loads(response.read(65536).decode("utf-8", errors="replace") or "{}")
             answers = payload.get("Answer") if isinstance(payload, dict) else []
-            if any(str(answer.get("type")) in {"1", "28"} and str(answer.get("data") or "").strip() for answer in answers or [] if isinstance(answer, dict)):
-                return True
+            for answer in answers or []:
+                if isinstance(answer, dict) and str(answer.get("type")) in {"1", "28"}:
+                    data = str(answer.get("data") or "").strip()
+                    if data:
+                        addresses.add(data)
         except Exception:
             continue
-    return False
+    return sorted(addresses)
+
+
+def dns_has_public_answer(domain):
+    return bool(resolve_public_dns_addresses(domain))
+
+
+def expected_public_ips(payload, settings):
+    values = []
+    for value in [payload.get("public_ip"), settings.get("public_ip")]:
+        raw = str(value or "").strip()
+        if raw and raw not in values:
+            values.append(raw)
+    return values
+
+
+def dns_target_matches_node(domain, payload, settings):
+    resolved = resolve_public_dns_addresses(domain)
+    expected = expected_public_ips(payload, settings)
+    if not resolved:
+        return False, resolved, expected, "dns_not_found"
+    if expected and not set(resolved).issubset(set(expected)):
+        return False, resolved, expected, "wrong_target"
+    return True, resolved, expected, "ok"
 
 
 def verify_acme_http_challenge(domain, webroot):
@@ -985,8 +1013,17 @@ def issue_ssl(payload, settings):
         write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root=document_root)
     run(["nginx", "-t"])
     run(["systemctl", "reload", "nginx"], check=False)
-    if not dns_has_public_answer(domain):
+    dns_ok, resolved_ips, expected_ips, dns_reason = dns_target_matches_node(domain, payload, settings)
+    if not dns_ok and dns_reason == "dns_not_found":
         return fail("SSL_DNS_NOT_FOUND", f"El dominio {domain} no tiene DNS publico A/AAAA para emitir SSL.")
+    if not dns_ok and dns_reason == "wrong_target":
+        return fail(
+            "SSL_DNS_WRONG_TARGET",
+            f"El dominio {domain} apunta a {', '.join(resolved_ips)}, pero este nodo espera {', '.join(expected_ips)}. Corrige el registro A/AAAA antes de emitir SSL.",
+            domain=domain,
+            resolved_ips=resolved_ips,
+            expected_ips=expected_ips,
+        )
     probe_ok, probe_detail = verify_acme_http_challenge(domain, webroot)
     if not probe_ok:
         return fail(
@@ -1002,10 +1039,11 @@ def issue_ssl(payload, settings):
         alias_domain = validate_domain(alias)
         if alias_domain == domain or alias_domain in requested_aliases:
             continue
-        if dns_has_public_answer(alias_domain):
+        alias_dns_ok, alias_resolved_ips, alias_expected_ips, alias_dns_reason = dns_target_matches_node(alias_domain, payload, settings)
+        if alias_dns_ok:
             requested_aliases.append(alias_domain)
         else:
-            skipped_aliases.append({"domain": alias_domain, "reason": "dns_not_found"})
+            skipped_aliases.append({"domain": alias_domain, "reason": alias_dns_reason, "resolved_ips": alias_resolved_ips, "expected_ips": alias_expected_ips})
     args = ["certbot", "certonly", "--webroot", "-w", webroot, "-d", domain, "--noninteractive", "--agree-tos", "--email", payload.get("email") or f"admin@{domain}"]
     for alias in requested_aliases:
         args.extend(["-d", alias])

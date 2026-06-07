@@ -10,6 +10,7 @@ from .billing_integration import (
     BillingServiceChangePasswordView,
     BillingServiceChangePlanView,
     BillingServiceDetailView,
+    BillingServicePanelLoginView,
     BillingServiceProvisionView,
     BillingServiceStatusView,
     BillingServiceSuspendView,
@@ -36,6 +37,7 @@ urlpatterns = [
     path("services/<str:external_service_id>/terminate/", BillingServiceTerminateView.as_view(), name="billing-service-terminate"),
     path("services/<str:external_service_id>/change-password/", BillingServiceChangePasswordView.as_view(), name="billing-service-change-password"),
     path("services/<str:external_service_id>/change-plan/", BillingServiceChangePlanView.as_view(), name="billing-service-change-plan"),
+    path("services/<str:external_service_id>/panel-login/", BillingServicePanelLoginView.as_view(), name="billing-service-panel-login"),
     path("services/<str:external_service_id>/usage/", BillingServiceUsageView.as_view(), name="billing-service-usage"),
     *router.urls,
 ]

@@ -2294,12 +2294,14 @@ def issue_domain_ssl(hosting_domain, email="", include_www=True, staging=False, 
             if mail_config_alias not in aliases:
                 aliases.append(mail_config_alias)
     document_root = (hosting_domain.document_root or "public_html").strip().strip("/")
+    public_ip = node_public_ip(hosting_domain.account.node)
     return queue_account_job(
         hosting_domain.account,
         AgentJob.Type.ISSUE_SSL,
         {
             "domain": hosting_domain.domain,
             "username": hosting_domain.account.username,
+            "public_ip": public_ip,
             "email": email or hosting_domain.account.customer_email or f"admin@{hosting_domain.domain}",
             "aliases": aliases,
             "document_root": document_root,

@@ -1,4 +1,6 @@
 import hashlib
+import html
+import json
 import re
 import secrets
 import socket
@@ -7,8 +9,10 @@ from datetime import timedelta
 
 from django.conf import settings
 from django import get_version as django_version
+from django.core import signing
 from django.db import transaction
 from django.db.models import Q
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import serializers, status as drf_status, viewsets
 from rest_framework.decorators import action
@@ -17,9 +21,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from agents.models import AgentJob, Node
+from ehpanel_web.auth_views import token_response_for_user
 from .local_provisioning import ensure_local_node, is_local_provisioning_enabled
 from .models import ApiKeyCredential, AuditLog, GlobalConfiguration, HostingAccount, HostingPlan
 from .services import change_account_password, node_public_ip, provision_hosting_account, queue_account_job, suspend_account, unsuspend_account
+
+BILLING_PANEL_SSO_SALT = "ehpanel-web-billing-panel-sso"
+BILLING_PANEL_SSO_MAX_AGE = int(getattr(settings, "BILLING_PANEL_SSO_MAX_AGE", 180))
 
 
 class BillingInternalTokenPermission(BasePermission):
@@ -201,8 +209,16 @@ def panel_url_for_request(request, account):
     return f"{base_url}/client/services/{account.id}"
 
 
+def billing_panel_login_url_for_request(request, account):
+    base_url = getattr(settings, "PUBLIC_PANEL_URL", "") or request.build_absolute_uri("/").rstrip("/")
+    payload = {"account_id": str(account.id), "user_id": account.owner_id, "nonce": secrets.token_urlsafe(16)}
+    token = signing.dumps(payload, salt=BILLING_PANEL_SSO_SALT, compress=True)
+    return f"{base_url}/billing-panel-sso/{token}/"
+
+
 def contract_account_response(request, account, status_value=None, message=""):
     account_status = status_value or ("provisioned" if account.status == HostingAccount.Status.ACTIVE else "queued")
+    login_url = billing_panel_login_url_for_request(request, account) if account.owner_id else panel_url_for_request(request, account)
     return {
         "ok": True,
         "status": account_status,
@@ -210,7 +226,8 @@ def contract_account_response(request, account, status_value=None, message=""):
         "domain": account.primary_domain,
         "username": account.username,
         "panel_url": panel_url_for_request(request, account),
-        "login_url": (getattr(settings, "PUBLIC_PANEL_URL", "") or request.build_absolute_uri("/").rstrip("/")),
+        "login_url": login_url,
+        "login_expires_in": BILLING_PANEL_SSO_MAX_AGE if account.owner_id else 0,
         "server": {
             "hostname": account.node.hostname if account.node_id else socket.gethostname(),
             "datacenter": datacenter_for_node(account.node),
@@ -712,6 +729,29 @@ class BillingServiceChangePlanView(BillingServiceDetailView):
         return self.change_plan(request, external_service_id)
 
 
+class BillingServicePanelLoginView(BillingServiceDetailView):
+    billing_required_scopes = ("billing:read",)
+
+    def post(self, request, external_service_id):
+        account = self.get_account(external_service_id)
+        user = account.owner
+        if not user or not user.is_active or user.is_staff or user.is_superuser:
+            return Response(
+                {"ok": False, "status": "failed", "detail": "La cuenta hosting no tiene un usuario cliente activo para SSO."},
+                status=drf_status.HTTP_409_CONFLICT,
+            )
+        audit_billing_call(request, AuditLog.Action.ACCOUNT_SYNCED, account, metadata={"billing_action": "panel-login"})
+        return Response(
+            {
+                "ok": True,
+                "status": "ready",
+                "login_url": billing_panel_login_url_for_request(request, account),
+                "panel_url": panel_url_for_request(request, account),
+                "expires_in": BILLING_PANEL_SSO_MAX_AGE,
+            }
+        )
+
+
 class BillingServiceUsageView(BillingServiceDetailView):
     billing_required_scopes = ("billing:usage", "billing:read")
 
@@ -784,6 +824,51 @@ class BillingNodeSummaryView(APIView):
             },
             "server_time": timezone.now().isoformat(),
         })
+
+
+class BillingPanelSsoConsumeView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request, token):
+        try:
+            payload = signing.loads(token, salt=BILLING_PANEL_SSO_SALT, max_age=BILLING_PANEL_SSO_MAX_AGE)
+        except signing.SignatureExpired:
+            return HttpResponse("El enlace de acceso al panel expiro. Vuelve a abrirlo desde Billing.", status=403, content_type="text/plain")
+        except signing.BadSignature:
+            return HttpResponse("Enlace de acceso al panel invalido.", status=403, content_type="text/plain")
+
+        account_id = str(payload.get("account_id") or "")
+        user_id = payload.get("user_id")
+        account = HostingAccount.objects.select_related("owner").filter(pk=account_id).first()
+        if not account or not account.owner_id or str(account.owner_id) != str(user_id):
+            return HttpResponse("La cuenta hosting no coincide con este enlace.", status=403, content_type="text/plain")
+        user = account.owner
+        if not user or not user.is_active or user.is_staff or user.is_superuser:
+            return HttpResponse("Usuario cliente no disponible para SSO.", status=403, content_type="text/plain")
+
+        tokens = token_response_for_user(user)
+        redirect_to = panel_url_for_request(request, account)
+        payload_json = json.dumps({"access": tokens["access"], "refresh": tokens["refresh"], "redirect": redirect_to})
+        html_body = f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Acceso EHPanel Web</title>
+  <meta name="robots" content="noindex">
+</head>
+<body>
+  <p>Iniciando sesion...</p>
+  <script>
+    const payload = {payload_json};
+    localStorage.setItem("eh_access", payload.access);
+    localStorage.setItem("eh_refresh", payload.refresh);
+    window.location.replace(payload.redirect);
+  </script>
+  <noscript><a href="{html.escape(redirect_to)}">Continuar al panel</a></noscript>
+</body>
+</html>"""
+        return HttpResponse(html_body, content_type="text/html")
 
 
 class BillingHostingAccountViewSet(viewsets.ViewSet):

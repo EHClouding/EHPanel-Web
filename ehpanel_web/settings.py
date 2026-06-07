@@ -13,6 +13,7 @@ load_dotenv(BASE_DIR / ".env")
 
 DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
+BILLING_PANEL_SSO_MAX_AGE = int(os.environ.get("BILLING_PANEL_SSO_MAX_AGE", "180"))
 
 SECRET_KEY = os.environ.get("SECRET_KEY")
 if not SECRET_KEY:
