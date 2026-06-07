@@ -718,6 +718,18 @@ export type ShellCommandResponse = {
   job: AgentJob
 }
 
+export function hostingTerminalWebSocketUrl(params: { account: string; cols?: number; cwd: string; rows?: number }) {
+  const base = BASE_URL || window.location.origin
+  const url = new URL("/ws/hosting-terminal/", base)
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  url.searchParams.set("account", params.account)
+  url.searchParams.set("cwd", params.cwd || "/")
+  url.searchParams.set("token", tokenStorage.getAccess() || "")
+  if (params.cols) url.searchParams.set("cols", String(params.cols))
+  if (params.rows) url.searchParams.set("rows", String(params.rows))
+  return url.toString()
+}
+
 export type HomeDashboardSummary = {
   activeSites: number
   alerts: Array<{ label: string; tone?: "amber" | "emerald" | "red" }>

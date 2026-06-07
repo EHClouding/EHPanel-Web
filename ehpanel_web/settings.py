@@ -54,6 +54,7 @@ LOCAL_PANEL_DATACENTER = os.environ.get("LOCAL_PANEL_DATACENTER", "")
 LOCAL_PUBLIC_IP = os.environ.get("LOCAL_PUBLIC_IP", "")
 LOCAL_PROVISIONING_HELPER = os.environ.get("LOCAL_PROVISIONING_HELPER", "/usr/local/sbin/ehpanel-local-provision")
 LOCAL_BACKGROUND_JOB_RUNNER = os.environ.get("LOCAL_BACKGROUND_JOB_RUNNER", "/usr/local/sbin/ehpanel-local-job-runner")
+LOCAL_TERMINAL_PTY_HELPER = os.environ.get("LOCAL_TERMINAL_PTY_HELPER", "/usr/local/sbin/ehpanel-terminal-pty")
 LOCAL_PROVISIONING_DRY_RUN = os.environ.get("LOCAL_PROVISIONING_DRY_RUN", "false").lower() == "true"
 LOCAL_PROVISIONING_SUDO = os.environ.get("LOCAL_PROVISIONING_SUDO", "true").lower() == "true"
 LOCAL_HOME_ROOT = os.environ.get("LOCAL_HOME_ROOT", "/home")

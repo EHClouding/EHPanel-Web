@@ -16,9 +16,12 @@ import {
   XCircle,
 } from "lucide-react"
 import type { ReactNode } from "react"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { FitAddon } from "@xterm/addon-fit"
+import { Terminal as XTerm } from "@xterm/xterm"
+import "@xterm/xterm/css/xterm.css"
 
-import { hostingApi, type AdvancedSummaryResponse, type AgentJob, type GitDeployDetection, type GitDeployLogs, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind, type HostingApplicationBackup, type ShellCommandGuide } from "@/api/hosting"
+import { hostingApi, hostingTerminalWebSocketUrl, type AdvancedSummaryResponse, type AgentJob, type GitDeployDetection, type GitDeployLogs, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind, type HostingApplicationBackup, type ShellCommandGuide } from "@/api/hosting"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -313,6 +316,7 @@ export function AdvancedPage() {
 
           {activeTab === "Consola" ? (
             <ShellConsoleTab
+              accountId={selectedAccount?.id || selectedAccountId}
               command={shellCommand}
               cwd={shellCwd}
               error={shellError}
@@ -675,6 +679,7 @@ function VhostManualTab({ items, onAdd, onDelete, onToggle, search, setSearch }:
 }
 
 function ShellConsoleTab({
+  accountId,
   command,
   cwd,
   error,
@@ -689,6 +694,7 @@ function ShellConsoleTab({
   result,
   timeout,
 }: {
+  accountId: string
   command: string
   cwd: string
   error: string
@@ -775,6 +781,7 @@ function ShellConsoleTab({
           </div>
         </div>
       </div>
+      <InteractiveTerminalPanel accountId={accountId} cwd={cwd || "/"} guide={guide} onCwdChange={onCwdChange} />
       {result ? (
         <div className="rounded-lg border border-slate-200 bg-white">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
@@ -806,6 +813,167 @@ function ShellConsoleTab({
           ]
         })}
       />
+    </div>
+  )
+}
+
+function InteractiveTerminalPanel({ accountId, cwd, guide, onCwdChange }: { accountId: string; cwd: string; guide: ShellCommandGuide | null; onCwdChange: (value: string) => void }) {
+  const terminalElementRef = useRef<HTMLDivElement | null>(null)
+  const terminalRef = useRef<XTerm | null>(null)
+  const fitAddonRef = useRef<FitAddon | null>(null)
+  const socketRef = useRef<WebSocket | null>(null)
+  const [isConnected, setIsConnected] = useState(false)
+  const [sessionCwd, setSessionCwd] = useState(cwd || "/")
+  const [statusText, setStatusText] = useState("Sin conexion")
+
+  useEffect(() => {
+    return () => closeTerminal()
+  }, [])
+
+  useEffect(() => {
+    if (!isConnected) setSessionCwd(cwd || "/")
+  }, [cwd, isConnected])
+
+  function ensureTerminal() {
+    if (terminalRef.current || !terminalElementRef.current) return terminalRef.current
+    const terminal = new XTerm({
+      convertEol: true,
+      cursorBlink: true,
+      disableStdin: false,
+      fontFamily: "JetBrains Mono, Consolas, monospace",
+      fontSize: 13,
+      rows: 24,
+      theme: {
+        background: "#020617",
+        cursor: "#bfdbfe",
+        foreground: "#e2e8f0",
+        selectionBackground: "#1d4ed8",
+      },
+    })
+    const fitAddon = new FitAddon()
+    terminal.loadAddon(fitAddon)
+    terminal.open(terminalElementRef.current)
+    fitAddon.fit()
+    terminalRef.current = terminal
+    fitAddonRef.current = fitAddon
+    terminal.onData((data) => {
+      const socket = socketRef.current
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ data, type: "input" }))
+      }
+    })
+    return terminal
+  }
+
+  function fitAndResize() {
+    const terminal = terminalRef.current
+    const fitAddon = fitAddonRef.current
+    const socket = socketRef.current
+    if (!terminal || !fitAddon) return
+    fitAddon.fit()
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ cols: terminal.cols, rows: terminal.rows, type: "resize" }))
+    }
+  }
+
+  function openTerminal() {
+    if (!accountId || socketRef.current?.readyState === WebSocket.OPEN) return
+    const terminal = ensureTerminal()
+    if (!terminal) return
+    terminal.clear()
+    terminal.writeln("Conectando terminal EHPanel...")
+    setStatusText("Conectando")
+    const cols = terminal.cols || 100
+    const rows = terminal.rows || 24
+    const socket = new WebSocket(hostingTerminalWebSocketUrl({ account: accountId, cols, cwd: sessionCwd || "/", rows }))
+    socketRef.current = socket
+    socket.onopen = () => {
+      setIsConnected(true)
+      setStatusText("Conectado")
+      fitAndResize()
+    }
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(String(event.data)) as { cwd?: string; data?: string; detail?: string; type?: string }
+        if (message.type === "output") terminal.write(message.data || "")
+        if (message.type === "ready") {
+          setStatusText(`Conectado en ${message.cwd || sessionCwd}`)
+          terminal.writeln(`\r\n[EHPanel] Sesion iniciada en ${message.cwd || sessionCwd}\r\n`)
+        }
+        if (message.type === "error") {
+          terminal.writeln(`\r\n[EHPanel] ${message.detail || "Error de terminal"}\r\n`)
+          setStatusText(message.detail || "Error")
+        }
+      } catch {
+        terminal.write(String(event.data))
+      }
+    }
+    socket.onerror = () => {
+      setStatusText("Error de conexion")
+      terminal.writeln("\r\n[EHPanel] No se pudo conectar al WebSocket de terminal.\r\n")
+    }
+    socket.onclose = () => {
+      setIsConnected(false)
+      setStatusText("Desconectado")
+      socketRef.current = null
+      terminal.writeln("\r\n[EHPanel] Terminal cerrada.\r\n")
+    }
+  }
+
+  function closeTerminal() {
+    const socket = socketRef.current
+    if (socket && socket.readyState <= WebSocket.OPEN) socket.close()
+    socketRef.current = null
+    setIsConnected(false)
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+        <div>
+          <h3 className="text-sm font-black text-slate-900">Terminal interactiva</h3>
+          <p className="mt-1 text-xs font-medium text-slate-500">Shell PTY real como usuario de la cuenta. Sin sudo y limitada al home del hosting.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={cn("rounded-full px-2 py-1 text-xs font-black", isConnected ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>{statusText}</span>
+          <Button disabled={isConnected} onClick={openTerminal} size="sm" type="button">
+            <Terminal className="h-4 w-4" />
+            Abrir terminal
+          </Button>
+          <Button disabled={!isConnected} onClick={fitAndResize} size="sm" type="button" variant="outline">
+            Ajustar
+          </Button>
+          <Button disabled={!isConnected} onClick={closeTerminal} size="sm" type="button" variant="outline">
+            Cerrar
+          </Button>
+        </div>
+      </div>
+      <div className="grid gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 md:grid-cols-[1fr_auto]">
+        <label className="block">
+          <span className="mb-1.5 block text-xs font-bold text-slate-600">Directorio inicial</span>
+          <input className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 font-mono text-sm outline-none focus:border-blue-500" disabled={isConnected} onChange={(event) => setSessionCwd(event.target.value)} value={sessionCwd} />
+        </label>
+        {guide?.cwd_suggestions?.length ? (
+          <label className="block min-w-[180px]">
+            <span className="mb-1.5 block text-xs font-bold text-slate-600">Rutas</span>
+            <select
+              className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-xs font-bold outline-none focus:border-blue-500"
+              disabled={isConnected}
+              onChange={(event) => {
+                setSessionCwd(event.target.value)
+                onCwdChange(event.target.value)
+              }}
+              value=""
+            >
+              <option value="">Seleccionar</option>
+              {guide.cwd_suggestions.map((item) => <option key={`terminal-${item.label}-${item.path}`} value={item.path}>{item.label}</option>)}
+            </select>
+          </label>
+        ) : null}
+      </div>
+      <div className="bg-slate-950 p-2">
+        <div className="h-[440px] overflow-hidden rounded-md" ref={terminalElementRef} />
+      </div>
     </div>
   )
 }
