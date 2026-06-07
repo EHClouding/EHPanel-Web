@@ -862,13 +862,6 @@ def pdns_record_name(zone, name):
 
 def resolve_public_dns_addresses(domain):
     addresses = set()
-    try:
-        for item in socket.getaddrinfo(domain, 80, type=socket.SOCK_STREAM):
-            if item and len(item) >= 5 and item[4]:
-                addresses.add(str(item[4][0]))
-    except socket.gaierror:
-        pass
-
     for record_type in ["A", "AAAA"]:
         url = f"https://cloudflare-dns.com/dns-query?name={domain}&type={record_type}"
         try:
@@ -909,7 +902,7 @@ def dns_target_matches_node(domain, payload, settings):
     return True, resolved, expected, "ok"
 
 
-def verify_acme_http_challenge(domain, webroot):
+def verify_acme_http_challenge(domain, webroot, connect_host=""):
     challenge_dir = Path(webroot) / ".well-known" / "acme-challenge"
     challenge_dir.mkdir(parents=True, exist_ok=True)
     for path in [Path(webroot), challenge_dir.parent, challenge_dir]:
@@ -920,9 +913,10 @@ def verify_acme_http_challenge(domain, webroot):
     probe = challenge_dir / token
     probe.write_text(expected, encoding="utf-8")
     probe.chmod(0o644)
-    url = f"http://{domain}/.well-known/acme-challenge/{token}"
+    host = str(connect_host or domain).strip()
+    url = f"http://{host}/.well-known/acme-challenge/{token}"
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "EHPanel-ACME-Probe/1.0"})
+        request = urllib.request.Request(url, headers={"User-Agent": "EHPanel-ACME-Probe/1.0", "Host": domain})
         with urllib.request.urlopen(request, timeout=12) as response:
             status = int(getattr(response, "status", 0) or response.getcode())
             final_url = response.geturl()
@@ -1024,7 +1018,8 @@ def issue_ssl(payload, settings):
             resolved_ips=resolved_ips,
             expected_ips=expected_ips,
         )
-    probe_ok, probe_detail = verify_acme_http_challenge(domain, webroot)
+    probe_host = expected_ips[0] if expected_ips else domain
+    probe_ok, probe_detail = verify_acme_http_challenge(domain, webroot, connect_host=probe_host)
     if not probe_ok:
         return fail(
             "SSL_ACME_HTTP01_NOT_REACHABLE",
