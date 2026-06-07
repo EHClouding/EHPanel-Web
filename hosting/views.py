@@ -177,6 +177,7 @@ from .services import (
     web_protection_ai_mock,
     install_wordpress,
     install_catalog_app,
+    prepare_app_database,
     apply_account_software,
     apply_software_settings,
     queue_app_action,
@@ -3033,6 +3034,7 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
         secrets_config = {} if delete else self._decrypt_advanced_secrets(item)
         runtime_config = {**config, **secrets_config, **(transient_config or {})}
         app = None
+        database_payload = {}
         auto_deploy = item.kind == HostingAdvancedItem.Kind.GIT_REPO and self._truthy(runtime_config.get("auto_deploy")) and not delete
         domain = item.account.domains.filter(domain=item.account.primary_domain).first() or item.account.domains.filter(is_primary=True).first() or item.account.domains.first()
         if auto_deploy:
@@ -3040,6 +3042,22 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
                 raise ValidationError({"account": "La cuenta no tiene un dominio activo para publicar el deploy."})
             if domain:
                 instance_id = runtime_config.get("instance_id") or f"git-{item.id}"
+                database_engine = str(runtime_config.get("database_engine") or "").strip().lower()
+                if database_engine and not str(runtime_config.get("database_url") or "").strip():
+                    database_values = prepare_app_database(
+                        item.account,
+                        database_engine,
+                        instance_id,
+                        runtime_config.get("db_name") or "",
+                        runtime_config.get("db_user") or "",
+                        runtime_config.get("db_password") or "",
+                    )
+                    runtime_config.update(database_values)
+                    database_payload = {
+                        "database_engine": database_values["database_engine"],
+                        "database": database_values["db_name"],
+                        "db_user": database_values["db_user"],
+                    }
                 detected_runtime = str(runtime_config.get("runtime") or runtime_config.get("detected_runtime") or "node").lower()
                 app_type = HostingApplication.AppType.DJANGO if detected_runtime in {"django", "git_django", "django_frontend"} else HostingApplication.AppType.NODEJS
                 app_metadata = {
@@ -3094,6 +3112,7 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
                 "enabled": bool(item.enabled) and not delete,
                 "delete": bool(delete),
                 "config": runtime_config,
+                **database_payload,
                 **({"app_id": app.id, "instance_id": (app.metadata or {}).get("instance_id"), "port": (app.metadata or {}).get("port")} if app else {}),
             },
         )

@@ -2872,6 +2872,33 @@ def register_app_database(account, engine, db_name, db_user, db_password, access
     return database
 
 
+def safe_app_database_slug(*parts, max_len=48):
+    raw = "_".join(str(part or "") for part in parts)
+    value = re.sub(r"[^A-Za-z0-9_]", "_", raw).strip("_").lower()
+    value = re.sub(r"_+", "_", value)[:max_len].strip("_")
+    return value or f"app_{secrets.token_hex(4)}"
+
+
+def prepare_app_database(account, engine, instance_id, db_name="", db_user="", db_password=""):
+    engine = str(engine or HostingDatabase.Engine.POSTGRESQL).lower()
+    db_name = str(db_name or "").strip()
+    db_user = str(db_user or "").strip()
+    db_password = str(db_password or "").strip()
+    if not db_name:
+        db_name = safe_app_database_slug(account.username, instance_id, "db")
+    if not db_user:
+        db_user = safe_app_database_slug(account.username, instance_id, "user")
+    if not db_password:
+        db_password = secrets.token_urlsafe(32)
+    register_app_database(account, engine, db_name, db_user, db_password)
+    return {
+        "database_engine": engine,
+        "db_name": db_name,
+        "db_user": db_user,
+        "db_password": db_password,
+    }
+
+
 def install_catalog_app(runtime, hosting_domain, payload):
     runtime = str(runtime or "").lower()
     if runtime == HostingApplication.AppType.WORDPRESS:
@@ -3827,6 +3854,12 @@ def sync_job_side_effects(job):
                 app.status = HostingApplication.Status.FAILED
                 app.metadata = {**(app.metadata or {}), "error_code": job.error_code, "error_detail": job.error_detail}
                 app.save(update_fields=["status", "metadata", "updated_at"])
+                database_name = (job.payload or {}).get("database")
+                if database_name:
+                    HostingDatabase.objects.filter(account=app.account, name=database_name).update(status=HostingDatabase.Status.FAILED)
+                    db_username = (job.payload or {}).get("db_user") or (job.payload or {}).get("user")
+                    if db_username:
+                        HostingDatabaseUser.objects.filter(account=app.account, username=db_username).update(status=HostingDatabaseUser.Status.FAILED)
 
     if job.job_type == AgentJob.Type.DEPLOY_GIT_APP:
         redacted_payload = AgentJob.redacted_payload(job.payload or {})
