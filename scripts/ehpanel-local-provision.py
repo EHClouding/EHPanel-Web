@@ -943,6 +943,7 @@ def provision_hosting(payload, settings):
         if not index.exists():
             index.write_text(f"<h1>{domain}</h1>\n<p>EHPanel Web</p>\n", encoding="utf-8")
             run(["chown", f"{username}:{username}", str(index)])
+    write_default_spa_fallback(account_document_root(username, settings, document_root), username)
     nginx_conf = write_nginx_proxy(domain, username, settings, document_root=document_root)
     mail_autoconfig_conf = write_mail_autoconfig_nginx_proxy(domain, username, settings)
     webmail_conf = write_webmail_nginx_proxy(domain, username, settings)
@@ -1890,22 +1891,59 @@ def restore_app_snapshot(payload, settings):
 def write_spa_fallback(public_dir, username):
     public_dir = Path(public_dir)
     htaccess = public_dir / ".htaccess"
-    htaccess.write_text(
-        """<IfModule mod_rewrite.c>
-RewriteEngine On
-RewriteBase /
-RewriteRule ^index\\.html$ - [L]
-RewriteCond %{REQUEST_FILENAME} -f [OR]
-RewriteCond %{REQUEST_FILENAME} -d
-RewriteRule ^ - [L]
-RewriteRule . /index.html [L]
-</IfModule>
-""",
-        encoding="utf-8",
-    )
+    htaccess.write_text(spa_fallback_htaccess_text(require_no_index_php=False), encoding="utf-8")
     htaccess.chmod(0o644)
     run(["chown", f"{username}:{username}", str(htaccess)], check=False)
     return htaccess
+
+
+def spa_fallback_htaccess_text(require_no_index_php=True):
+    php_guard = "RewriteCond %{DOCUMENT_ROOT}/index.php !-f\n" if require_no_index_php else ""
+    return f"""<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /
+RewriteRule ^index\\.html$ - [L]
+RewriteCond %{{REQUEST_FILENAME}} -f [OR]
+RewriteCond %{{REQUEST_FILENAME}} -d
+RewriteRule ^ - [L]
+RewriteCond %{{DOCUMENT_ROOT}}/index.html -f
+{php_guard}RewriteRule . /index.html [L]
+</IfModule>
+"""
+
+
+def write_default_spa_fallback(public_dir, username):
+    public_dir = Path(public_dir)
+    htaccess = public_dir / ".htaccess"
+    if htaccess.exists():
+        return None
+    htaccess.write_text(spa_fallback_htaccess_text(require_no_index_php=True), encoding="utf-8")
+    htaccess.chmod(0o644)
+    run(["chown", f"{username}:{username}", str(htaccess)], check=False)
+    return htaccess
+
+
+def path_touches_htaccess(path):
+    return any(part.lower() == ".htaccess" for part in Path(path).parts)
+
+
+def archive_contains_htaccess(source):
+    lower = source.name.lower()
+    try:
+        if lower.endswith(".zip"):
+            with zipfile.ZipFile(source) as archive:
+                return any(path_touches_htaccess(name) for name in archive.namelist())
+        if lower.endswith(".tar") or lower.endswith(".tar.gz") or lower.endswith(".tgz"):
+            with tarfile.open(source) as archive:
+                return any(path_touches_htaccess(member.name) for member in archive.getmembers())
+    except Exception:
+        return False
+    return False
+
+
+def restart_openlitespeed_for_htaccess():
+    result = run(["systemctl", "restart", "lshttpd"], check=False)
+    return result.get("returncode") == 0
 
 
 def public_url(payload, domain, path=""):
@@ -3413,7 +3451,8 @@ def file_write(payload, settings):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(str(payload.get("content") or ""), encoding="utf-8")
     run(["chown", f"{username}:{username}", str(target)], check=False)
-    return ok(path=rel, absolute_path=str(target), size=target.stat().st_size, mode=mode_string(target))
+    htaccess_reloaded = restart_openlitespeed_for_htaccess() if path_touches_htaccess(target) else False
+    return ok(path=rel, absolute_path=str(target), size=target.stat().st_size, mode=mode_string(target), openlitespeed_restarted=htaccess_reloaded)
 
 
 def ensure_target_available(target, overwrite):
@@ -3448,7 +3487,8 @@ def file_upload(payload, settings):
         shutil.copy2(source, target)
         source.unlink(missing_ok=True)
     chown_account_path(username, target)
-    return ok(path=rel, absolute_path=str(target), size=target.stat().st_size, mode=mode_string(target))
+    htaccess_reloaded = restart_openlitespeed_for_htaccess() if path_touches_htaccess(target) else False
+    return ok(path=rel, absolute_path=str(target), size=target.stat().st_size, mode=mode_string(target), openlitespeed_restarted=htaccess_reloaded)
 
 
 def filename_from_url(url):
@@ -3582,6 +3622,7 @@ def file_extract(payload, settings):
     home, source, rel = safe_account_path(payload, settings)
     if not source.exists() or not source.is_file():
         return fail("FILE_NOT_FOUND", f"No existe el archivo: {rel}")
+    touches_htaccess = archive_contains_htaccess(source)
     destination_payload = {"username": username, "path": payload.get("destination_path") or "/"}
     _home, destination, rel_dest = safe_account_path(destination_payload, settings)
     destination.mkdir(parents=True, exist_ok=True)
@@ -3606,7 +3647,8 @@ def file_extract(payload, settings):
     else:
         return fail("UNSUPPORTED_ARCHIVE", "Formato de archivo no soportado.")
     run(["chown", "-R", f"{username}:{username}", str(destination)], check=False)
-    return ok(path=rel, destination_path=rel_dest, extracted=True)
+    htaccess_reloaded = restart_openlitespeed_for_htaccess() if touches_htaccess else False
+    return ok(path=rel, destination_path=rel_dest, extracted=True, openlitespeed_restarted=htaccess_reloaded)
 
 
 def file_download(payload, settings):

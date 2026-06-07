@@ -1244,6 +1244,7 @@ export type FileListResponse = {
   items?: FileManagerItem[]
   result?: {
     items?: FileManagerItem[]
+    openlitespeed_restarted?: boolean
     path?: string
   }
 }

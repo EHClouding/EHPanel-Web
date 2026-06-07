@@ -227,6 +227,7 @@ export function FilesPage() {
 
     try {
       let uploadedBeforeCurrent = 0
+      let openLiteSpeedRestarted = false
       for (const [index, item] of items.entries()) {
         setUploadSession((current) => current ? { ...current, currentFile: item.relativePath, currentIndex: index, fileProgress: 0 } : current)
         const response = await hostingApi.fileUploadWithProgress(accountId, joinPath(currentPath, item.relativePath), item.file, true, (progress) => {
@@ -236,12 +237,16 @@ export function FilesPage() {
             loaded: uploadedBeforeCurrent + progress.loaded,
           } : current)
         })
-        await waitFileResult(response.job, response)
+        const completed = await waitFileResult(response.job, response)
+        openLiteSpeedRestarted = openLiteSpeedRestarted || resultFlag(completed, "openlitespeed_restarted")
         uploadedBeforeCurrent += item.file.size
         setUploadSession((current) => current ? { ...current, fileProgress: 100, loaded: uploadedBeforeCurrent } : current)
       }
       await loadFiles(accountId, currentPath)
-      if (hasHtaccess && activeAccount?.web_engine === "openlitespeed") {
+      if (openLiteSpeedRestarted) {
+        setShowOpenLiteSpeedApply(false)
+        setMessage(`${items.length === 1 ? "Archivo cargado" : `${items.length} archivos cargados`}. OpenLiteSpeed reiniciado para aplicar cambios .htaccess.`)
+      } else if (hasHtaccess && activeAccount?.web_engine === "openlitespeed") {
         setShowOpenLiteSpeedApply(true)
         setMessage(`${items.length === 1 ? "Archivo cargado" : `${items.length} archivos cargados`}. Reinicia OpenLiteSpeed para aplicar cambios .htaccess.`)
       } else {
@@ -384,7 +389,12 @@ export function FilesPage() {
       const response = await operationHandler()
       const completed = await waitFileResult(response.job, response)
       await loadFiles(accountId, currentPath)
-      setMessage(completed.status === "success" ? successMessage : `${successMessage} Job ${completed.job} en proceso.`)
+      if (completed.status === "success" && resultFlag(completed, "openlitespeed_restarted")) {
+        setShowOpenLiteSpeedApply(false)
+        setMessage(`${successMessage} OpenLiteSpeed reiniciado para aplicar cambios .htaccess.`)
+      } else {
+        setMessage(completed.status === "success" ? successMessage : `${successMessage} Job ${completed.job} en proceso.`)
+      }
       afterComplete?.()
     } catch (mutationError) {
       setError(readMessage(mutationError))
@@ -1285,6 +1295,10 @@ function extractContent(response: { content?: string; result?: unknown }) {
   if (typeof response.content === "string") return response.content
   if (isObject(response.result) && typeof response.result.content === "string") return response.result.content
   return ""
+}
+
+function resultFlag(response: { result?: unknown }, key: string) {
+  return isObject(response.result) && response.result[key] === true
 }
 
 function mapFileItem(item: FileManagerItem, index: number): FileEntry {
