@@ -18,7 +18,7 @@ import {
 import type { ReactNode } from "react"
 import { useEffect, useMemo, useState } from "react"
 
-import { hostingApi, type AdvancedSummaryResponse, type GitDeployDetection, type GitDeployLogs, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind, type HostingApplicationBackup } from "@/api/hosting"
+import { hostingApi, type AdvancedSummaryResponse, type AgentJob, type GitDeployDetection, type GitDeployLogs, type HostingAccount, type HostingAdvancedItem, type HostingAdvancedKind, type HostingApplicationBackup, type ShellCommandGuide } from "@/api/hosting"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -30,12 +30,13 @@ type AdvancedTab =
   | "Redirecciones"
   | "Headers"
   | "Webhooks"
+  | "Consola"
   | "Jobs"
   | "VHost Manual"
 
 type ModalKind = Exclude<HostingAdvancedKind, "vhost_manual"> | "vhost_manual" | null
 
-const tabs: AdvancedTab[] = ["Git / Deploy", "SSH Keys", "Cron Jobs", "Variables", "Redirecciones", "Headers", "Webhooks", "Jobs", "VHost Manual"]
+const tabs: AdvancedTab[] = ["Git / Deploy", "SSH Keys", "Cron Jobs", "Variables", "Redirecciones", "Headers", "Webhooks", "Consola", "Jobs", "VHost Manual"]
 
 const tabKind: Partial<Record<AdvancedTab, HostingAdvancedKind>> = {
   "Git / Deploy": "git_repo",
@@ -99,6 +100,14 @@ export function AdvancedPage() {
   const [search, setSearch] = useState("")
   const [gitActionLoading, setGitActionLoading] = useState("")
   const [gitLogs, setGitLogs] = useState<GitDeployLogs | null>(null)
+  const [shellCommand, setShellCommand] = useState("pwd")
+  const [shellCwd, setShellCwd] = useState("/")
+  const [shellError, setShellError] = useState("")
+  const [shellGuide, setShellGuide] = useState<ShellCommandGuide | null>(null)
+  const [shellHistory, setShellHistory] = useState<AgentJob[]>([])
+  const [shellLoading, setShellLoading] = useState(false)
+  const [shellResult, setShellResult] = useState<AgentJob | null>(null)
+  const [shellTimeout, setShellTimeout] = useState(120)
 
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId) || accounts[0],
@@ -192,9 +201,52 @@ export function AdvancedPage() {
     }
   }
 
+  async function loadShellConsole(accountId = selectedAccount?.id || selectedAccountId) {
+    if (!accountId) return
+    setShellError("")
+    try {
+      const [guide, history] = await Promise.all([
+        hostingApi.shellCommandGuide(accountId),
+        hostingApi.shellCommandHistory(accountId),
+      ])
+      setShellGuide(guide)
+      setShellHistory(history.results)
+      if (!shellCwd && guide.cwd_suggestions[0]?.path) setShellCwd(guide.cwd_suggestions[0].path)
+    } catch (err) {
+      setShellError(err instanceof Error ? err.message : "No se pudo cargar la consola.")
+    }
+  }
+
+  async function runShellCommand() {
+    const accountId = selectedAccount?.id || selectedAccountId
+    if (!accountId) return
+    setShellLoading(true)
+    setShellError("")
+    setShellResult(null)
+    try {
+      const response = await hostingApi.runShellCommand({
+        account: accountId,
+        command: shellCommand,
+        cwd: shellCwd || "/",
+        timeout: shellTimeout,
+      })
+      setShellResult(response.job)
+      await loadShellConsole(accountId)
+      await loadSummary(accountId)
+    } catch (err) {
+      setShellError(err instanceof Error ? err.message : "No se pudo ejecutar el comando.")
+    } finally {
+      setShellLoading(false)
+    }
+  }
+
   useEffect(() => {
     void loadAccounts()
   }, [])
+
+  useEffect(() => {
+    if (activeTab === "Consola" && selectedAccount?.id) void loadShellConsole(selectedAccount.id)
+  }, [activeTab, selectedAccount?.id])
 
   const items = (summary?.items || []).filter((item) => {
     const kind = tabKind[activeTab]
@@ -259,7 +311,23 @@ export function AdvancedPage() {
         <div className="p-4">
           {error ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{error}</div> : null}
 
-          {activeTab === "Jobs" ? (
+          {activeTab === "Consola" ? (
+            <ShellConsoleTab
+              command={shellCommand}
+              cwd={shellCwd}
+              error={shellError}
+              guide={shellGuide}
+              history={shellHistory}
+              loading={shellLoading}
+              onCommandChange={setShellCommand}
+              onCwdChange={setShellCwd}
+              onRefresh={() => void loadShellConsole()}
+              onRun={() => void runShellCommand()}
+              onTimeoutChange={setShellTimeout}
+              result={shellResult}
+              timeout={shellTimeout}
+            />
+          ) : activeTab === "Jobs" ? (
             <JobsTab summary={summary} />
           ) : activeTab === "VHost Manual" ? (
             <VhostManualTab items={items} onAdd={() => setModal("vhost_manual")} onDelete={deleteItem} onToggle={toggleItem} search={search} setSearch={setSearch} />
@@ -606,6 +674,142 @@ function VhostManualTab({ items, onAdd, onDelete, onToggle, search, setSearch }:
   )
 }
 
+function ShellConsoleTab({
+  command,
+  cwd,
+  error,
+  guide,
+  history,
+  loading,
+  onCommandChange,
+  onCwdChange,
+  onRefresh,
+  onRun,
+  onTimeoutChange,
+  result,
+  timeout,
+}: {
+  command: string
+  cwd: string
+  error: string
+  guide: ShellCommandGuide | null
+  history: AgentJob[]
+  loading: boolean
+  onCommandChange: (value: string) => void
+  onCwdChange: (value: string) => void
+  onRefresh: () => void
+  onRun: () => void
+  onTimeoutChange: (value: number) => void
+  result: AgentJob | null
+  timeout: number
+}) {
+  const output = resultOutput(result)
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 lg:grid-cols-[1.25fr_0.75fr]">
+        <div className="rounded-lg border border-slate-200 bg-white p-4">
+          <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-black text-slate-900">Consola controlada</h3>
+              <p className="mt-1 text-xs font-medium leading-5 text-slate-500">Ejecuta comandos como el usuario de la cuenta, dentro de su home, sin sudo.</p>
+            </div>
+            <Button disabled={loading} onClick={onRefresh} size="sm" type="button" variant="outline">
+              <RefreshCcw className="h-4 w-4" />
+              Actualizar
+            </Button>
+          </div>
+          {error ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{error}</div> : null}
+          <div className="grid gap-3 md:grid-cols-[1fr_150px]">
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold text-slate-600">Directorio de trabajo</span>
+              <div className="flex gap-2">
+                <input className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 px-3 font-mono text-sm outline-none focus:border-blue-500" onChange={(event) => onCwdChange(event.target.value)} value={cwd} />
+                {guide?.cwd_suggestions?.length ? (
+                  <select className="h-9 rounded-md border border-slate-200 bg-white px-2 text-xs font-bold outline-none focus:border-blue-500" onChange={(event) => onCwdChange(event.target.value)} value="">
+                    <option value="">Rutas</option>
+                    {guide.cwd_suggestions.map((item) => <option key={`${item.label}-${item.path}`} value={item.path}>{item.label}</option>)}
+                  </select>
+                ) : null}
+              </div>
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold text-slate-600">Timeout</span>
+              <input className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-500" max={600} min={5} onChange={(event) => onTimeoutChange(Number(event.target.value || 120))} type="number" value={timeout} />
+            </label>
+          </div>
+          <label className="mt-3 block">
+            <span className="mb-1.5 block text-xs font-bold text-slate-600">Comando</span>
+            <textarea className="min-h-[110px] w-full rounded-md border border-slate-200 px-3 py-2 font-mono text-sm outline-none focus:border-blue-500" onChange={(event) => onCommandChange(event.target.value)} value={command} />
+          </label>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-semibold text-slate-500">
+              {guide ? `Scope: ${guide.limits.cwd_scope} · Usuario: ${guide.limits.runs_as}` : "Cargando limites de ejecucion"}
+            </div>
+            <Button disabled={loading || !command.trim()} onClick={onRun} size="sm" type="button">
+              <Terminal className="h-4 w-4" />
+              {loading ? "Ejecutando..." : "Ejecutar"}
+            </Button>
+          </div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+          <h3 className="text-sm font-black text-slate-900">Manual rapido</h3>
+          <div className="mt-3 max-h-[360px] space-y-3 overflow-auto pr-1">
+            {(guide?.guide || []).map((group) => (
+              <div key={group.group}>
+                <div className="mb-1 text-[11px] font-black uppercase tracking-wide text-slate-500">{group.group}</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {group.commands.map((item) => (
+                    <button className="rounded-md border border-slate-200 bg-white px-2 py-1 font-mono text-[11px] font-bold text-slate-700 transition hover:border-blue-200 hover:text-blue-700" key={item} onClick={() => onCommandChange(item)} type="button">
+                      {item}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {guide?.allowed_executables?.length ? (
+              <div>
+                <div className="mb-1 text-[11px] font-black uppercase tracking-wide text-slate-500">Permitidos</div>
+                <div className="text-xs font-semibold leading-5 text-slate-600">{guide.allowed_executables.join(", ")}</div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      {result ? (
+        <div className="rounded-lg border border-slate-200 bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
+            <div className="text-sm font-black text-slate-800">Resultado</div>
+            <div className="flex items-center gap-2">
+              <StatusBadge enabled status={result.status} />
+              <span className="text-xs font-semibold text-slate-500">{formatDate(result.finished_at || result.updated_at || "")}</span>
+            </div>
+          </div>
+          {result.error_detail ? <div className="border-b border-red-100 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{result.error_detail}</div> : null}
+          <div className="grid gap-3 p-3 md:grid-cols-2">
+            <LogBlock label="stdout" value={output.stdout} />
+            <LogBlock label="stderr" value={output.stderr} />
+          </div>
+        </div>
+      ) : null}
+      <SimpleTable
+        columns={["Fecha", "Estado", "Ruta", "Comando", "Duracion"]}
+        emptyText="Sin comandos ejecutados."
+        rows={history.map((job) => {
+          const payload = job.payload || {}
+          const resultData = job.result || {}
+          return [
+            formatDate(job.queued_at),
+            <StatusBadge enabled status={job.status} />,
+            String(resultData.cwd || payload.cwd || "/"),
+            <code className="font-mono text-xs">{String(payload.command || resultData.command || "")}</code>,
+            resultData.duration_seconds ? `${String(resultData.duration_seconds)}s` : "-",
+          ]
+        })}
+      />
+    </div>
+  )
+}
+
 function JobsTab({ summary }: { summary: AdvancedSummaryResponse | null }) {
   return (
     <div className="space-y-3">
@@ -755,6 +959,14 @@ function LogBlock({ label, value }: { label: string; value: string }) {
       <pre className="max-h-64 overflow-auto rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">{value || "Sin salida"}</pre>
     </div>
   )
+}
+
+function resultOutput(job: AgentJob | null) {
+  const result = job?.result || {}
+  return {
+    stderr: String(result.stderr || result.stderr_tail || ""),
+    stdout: String(result.stdout || result.stdout_tail || ""),
+  }
 }
 
 function AdvancedModal({ accountId, kind, onClose, onSaved }: { accountId: string; kind: HostingAdvancedKind; onClose: () => void; onSaved: () => void }) {

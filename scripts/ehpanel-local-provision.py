@@ -3346,6 +3346,8 @@ def service_action(payload, settings=None):
         return rollback_git_frontend(payload, settings or {})
     if str(payload.get("action") or "").strip() == "restore_app_snapshot":
         return restore_app_snapshot(payload, settings or {})
+    if str(payload.get("action") or "").strip() == "shell_command":
+        return shell_command(payload, settings or {})
 
     service = str(payload.get("service") or "").strip()
     action = str(payload.get("action") or "").strip()
@@ -3399,6 +3401,158 @@ def safe_account_path(payload, settings, key="path"):
     if os.path.commonpath([str(home), str(target)]) != str(home):
         raise ValueError("Ruta fuera de la cuenta.")
     return home, target, f"/{rel}".rstrip("/") or "/"
+
+
+SHELL_ALLOWED_EXECUTABLES = {
+    "./manage.py",
+    "cat",
+    "chmod",
+    "composer",
+    "cp",
+    "df",
+    "du",
+    "find",
+    "git",
+    "grep",
+    "head",
+    "ls",
+    "mkdir",
+    "mv",
+    "node",
+    "npm",
+    "npx",
+    "php",
+    "pip",
+    "pip3",
+    "pnpm",
+    "pwd",
+    "python",
+    "python3",
+    "rm",
+    "tail",
+    "touch",
+    "yarn",
+}
+SHELL_DENIED_EXECUTABLES = {
+    "chown",
+    "crontab",
+    "dd",
+    "fdisk",
+    "firewall-cmd",
+    "iptables",
+    "journalctl",
+    "killall",
+    "mkfs",
+    "mount",
+    "nc",
+    "ncat",
+    "nft",
+    "parted",
+    "passwd",
+    "pkill",
+    "runuser",
+    "scp",
+    "service",
+    "setfacl",
+    "sftp",
+    "ssh",
+    "su",
+    "sudo",
+    "systemctl",
+    "umount",
+    "useradd",
+    "usermod",
+}
+SHELL_DENIED_PATTERNS = [
+    r"`",
+    r"\$\(",
+    r"\|\s*(ba)?sh\b",
+    r"\b(curl|wget)\b.*\|\s*(ba)?sh\b",
+    r"\brm\s+-[^\n;|&]*[rf][^\n;|&]*\s+/",
+    r"\bchmod\s+-R\s+777\s+/",
+]
+
+
+def _shell_segment_executable(segment):
+    segment = segment.strip()
+    if not segment:
+        return ""
+    parts = segment.split()
+    index = 0
+    while index < len(parts) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", parts[index]):
+        index += 1
+    if index >= len(parts):
+        return ""
+    return parts[index].strip().strip("'\"")
+
+
+def validate_shell_command(command):
+    command = str(command or "").strip()
+    if not command:
+        raise ValueError("Comando vacio.")
+    if len(command) > 2000:
+        raise ValueError("Comando demasiado largo.")
+    if "\x00" in command:
+        raise ValueError("Comando invalido.")
+    lowered = command.lower()
+    for pattern in SHELL_DENIED_PATTERNS:
+        if re.search(pattern, lowered):
+            raise ValueError("El comando contiene una construccion no permitida.")
+    segments = [part for part in re.split(r"(?:&&|\|\||;|\n|\|)", command) if part.strip()]
+    for segment in segments:
+        executable = _shell_segment_executable(segment)
+        base = Path(executable).name if executable else ""
+        if executable in SHELL_DENIED_EXECUTABLES or base in SHELL_DENIED_EXECUTABLES:
+            raise ValueError(f"Comando no permitido: {executable}")
+        if executable not in SHELL_ALLOWED_EXECUTABLES and base not in SHELL_ALLOWED_EXECUTABLES:
+            raise ValueError(f"Comando no permitido: {executable}")
+    return command
+
+
+def shell_command(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    command = validate_shell_command(payload.get("command"))
+    timeout = max(5, min(int(payload.get("timeout") or 120), 600))
+    home, cwd, rel = safe_account_path({"username": username, "path": payload.get("cwd") or "/"}, settings)
+    if not cwd.exists() or not cwd.is_dir():
+        return fail("SHELL_CWD_NOT_FOUND", f"No existe el directorio de trabajo: {rel}")
+    env = {
+        "CI": "true",
+        "HOME": str(home),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "USER": username,
+    }
+    env_parts = [f"{key}={value}" for key, value in env.items()]
+    args = ["sudo", "-u", username, "env", *env_parts, "/bin/bash", "-lc", command]
+    started = time.time()
+    try:
+        completed = subprocess.run(args, text=True, capture_output=True, timeout=timeout, cwd=str(cwd), check=False)
+    except subprocess.TimeoutExpired as exc:
+        return fail(
+            "SHELL_COMMAND_TIMEOUT",
+            f"El comando excedio el timeout de {timeout} segundos.",
+            cwd=rel,
+            timeout=timeout,
+            stdout_tail=str(exc.stdout or "")[-12000:],
+            stderr_tail=str(exc.stderr or "")[-12000:],
+        )
+    duration = round(time.time() - started, 3)
+    payload_result = {
+        "command": command,
+        "cwd": rel,
+        "duration_seconds": duration,
+        "returncode": completed.returncode,
+        "stderr": (completed.stderr or "")[-20000:],
+        "stderr_tail": (completed.stderr or "")[-12000:],
+        "stdout": (completed.stdout or "")[-20000:],
+        "stdout_tail": (completed.stdout or "")[-12000:],
+        "timeout": timeout,
+        "username": username,
+    }
+    if completed.returncode != 0:
+        return fail("SHELL_COMMAND_FAILED", f"El comando termino con codigo {completed.returncode}.", **payload_result)
+    return ok(**payload_result)
 
 
 def mode_string(path):

@@ -2748,6 +2748,40 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
     serializer_class = HostingAdvancedItemSerializer
     permission_classes = [IsAdminOrScopedUser]
     git_secret_keys = {"auth_token", "pat", "token", "db_password", "database_url", "webhook_secret"}
+    shell_allowed_commands = [
+        "pwd",
+        "ls -lah",
+        "du -sh .",
+        "find . -maxdepth 2 -type f",
+        "git status",
+        "git pull --ff-only",
+        "npm install",
+        "npm run build",
+        "npm run migrate",
+        "npx prisma migrate deploy",
+        "pnpm install",
+        "pnpm run build",
+        "yarn install",
+        "yarn build",
+        "composer install --no-dev --optimize-autoloader",
+        "php artisan migrate --force",
+        "php artisan cache:clear",
+        "php artisan config:cache",
+        "python3 -m venv .venv",
+        ".venv/bin/pip install -r requirements.txt",
+        ".venv/bin/python manage.py migrate --noinput",
+        ".venv/bin/python manage.py collectstatic --noinput",
+        "tail -n 100 storage/logs/laravel.log",
+        "tail -n 100 logs/error.log",
+    ]
+    shell_guide = [
+        {"group": "Basicos", "commands": ["pwd", "ls -lah", "du -sh .", "find . -maxdepth 2 -type f"]},
+        {"group": "Git", "commands": ["git status", "git pull --ff-only"]},
+        {"group": "Node", "commands": ["npm install", "npm run build", "npm run migrate", "npx prisma migrate deploy", "pnpm install", "pnpm run build", "yarn install", "yarn build"]},
+        {"group": "Laravel/PHP", "commands": ["composer install --no-dev --optimize-autoloader", "php artisan migrate --force", "php artisan cache:clear", "php artisan config:cache"]},
+        {"group": "Python/Django", "commands": ["python3 -m venv .venv", ".venv/bin/pip install -r requirements.txt", ".venv/bin/python manage.py migrate --noinput", ".venv/bin/python manage.py collectstatic --noinput"]},
+        {"group": "Logs", "commands": ["tail -n 100 storage/logs/laravel.log", "tail -n 100 logs/error.log"]},
+    ]
 
     @staticmethod
     def _truthy(value):
@@ -2764,6 +2798,140 @@ class HostingAdvancedItemViewSet(viewsets.ModelViewSet):
         if kind:
             queryset = queryset.filter(kind=kind)
         return queryset
+
+    def _get_scoped_account(self, account_id):
+        account = scoped_accounts(HostingAccount.objects.all(), self.request.user).filter(id=account_id).first()
+        if not account:
+            raise ValidationError({"account": "Cuenta no disponible."})
+        return account
+
+    def _shell_cwd_suggestions(self, account):
+        suggestions = [
+            {"label": "Home", "path": "/"},
+            {"label": "Public HTML", "path": "/public_html"},
+            {"label": "Aplicaciones", "path": "/apps"},
+            {"label": "Logs", "path": "/logs"},
+        ]
+        seen = {item["path"] for item in suggestions}
+        for item in HostingAdvancedItem.objects.filter(account=account, kind=HostingAdvancedItem.Kind.GIT_REPO).order_by("-updated_at")[:10]:
+            config = item.config if isinstance(item.config, dict) else {}
+            working_dir = str(config.get("working_dir") or "").strip()
+            if working_dir:
+                path = "/" + working_dir.strip("/")
+                if path not in seen:
+                    suggestions.append({"label": item.name, "path": path})
+                    seen.add(path)
+        for app in HostingApplication.objects.filter(account=account).order_by("-updated_at")[:10]:
+            install_path = str(app.install_path or "").strip().replace("\\", "/")
+            prefix = f"/home/{account.username}/"
+            if install_path.startswith(prefix):
+                path = "/" + install_path[len(prefix):].strip("/")
+                if path not in seen:
+                    suggestions.append({"label": app.name, "path": path})
+                    seen.add(path)
+        return suggestions
+
+    @action(detail=False, methods=["get"], url_path="shell-guide")
+    def shell_guide_action(self, request):
+        account_id = request.query_params.get("account")
+        account = self._get_scoped_account(account_id) if account_id else scoped_accounts(HostingAccount.objects.all(), request.user).first()
+        if not account:
+            raise ValidationError({"account": "Cuenta no disponible."})
+        return Response({
+            "allowed_commands": self.shell_allowed_commands,
+            "allowed_executables": [
+                "cat",
+                "chmod",
+                "composer",
+                "cp",
+                "df",
+                "du",
+                "find",
+                "git",
+                "grep",
+                "head",
+                "ls",
+                "mkdir",
+                "mv",
+                "node",
+                "npm",
+                "npx",
+                "php",
+                "pip",
+                "pip3",
+                "pnpm",
+                "pwd",
+                "python",
+                "python3",
+                "rm",
+                "tail",
+                "touch",
+                "yarn",
+            ],
+            "cwd_suggestions": self._shell_cwd_suggestions(account),
+            "guide": self.shell_guide,
+            "limits": {
+                "cwd_scope": f"/home/{account.username}",
+                "max_command_chars": 2000,
+                "max_timeout_seconds": 600,
+                "runs_as": account.username,
+            },
+            "security_notes": [
+                "Los comandos se ejecutan como el usuario Linux de la cuenta, sin sudo.",
+                "El directorio de trabajo debe estar dentro de la cuenta de hosting.",
+                "Cada ejecucion queda registrada en Jobs y Auditoria.",
+            ],
+        })
+
+    @action(detail=False, methods=["get"], url_path="shell-history")
+    def shell_history(self, request):
+        account = self._get_scoped_account(request.query_params.get("account"))
+        jobs = AgentJob.objects.filter(
+            job_type=AgentJob.Type.SERVICE_ACTION,
+            payload__account_id=str(account.id),
+            payload__action="shell_command",
+        ).order_by("-queued_at")[:20]
+        return Response({"results": AgentJobSerializer(jobs, many=True, context=self.get_serializer_context()).data})
+
+    @action(detail=False, methods=["post"], url_path="shell-command")
+    def shell_command(self, request):
+        from .local_provisioning import dispatch_or_execute_local
+
+        account = self._get_scoped_account(request.data.get("account"))
+        command = str(request.data.get("command") or "").strip()
+        cwd = str(request.data.get("cwd") or "/").strip() or "/"
+        if not command:
+            raise ValidationError({"command": "Comando requerido."})
+        if len(command) > 2000:
+            raise ValidationError({"command": "Comando demasiado largo."})
+        if len(cwd) > 255:
+            raise ValidationError({"cwd": "Ruta demasiado larga."})
+        try:
+            timeout = int(request.data.get("timeout") or 120)
+        except (TypeError, ValueError):
+            timeout = 120
+        timeout = max(5, min(timeout, 600))
+        job = AgentJob.objects.create(
+            node=account.node,
+            job_type=AgentJob.Type.SERVICE_ACTION,
+            payload={
+                "action": "shell_command",
+                "account_id": str(account.id),
+                "command": command,
+                "cwd": cwd,
+                "requested_by": request.user.get_username() if request.user and request.user.is_authenticated else "system",
+                "timeout": timeout,
+                "username": account.username,
+            },
+        )
+        dispatch_or_execute_local(job)
+        audit_action(
+            request,
+            AuditLog.Action.ACCOUNT_UPDATED,
+            account=account,
+            metadata={"advanced_action": "shell_command", "cwd": cwd, "job": str(job.id)},
+        )
+        return Response({"job": AgentJobSerializer(job, context=self.get_serializer_context()).data})
 
     def _decrypt_advanced_secrets(self, item):
         if item.kind != HostingAdvancedItem.Kind.GIT_REPO:

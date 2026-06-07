@@ -700,6 +700,24 @@ export type GitDeployLogs = {
   snapshots?: HostingApplicationBackup[]
 }
 
+export type ShellCommandGuide = {
+  allowed_commands: string[]
+  allowed_executables?: string[]
+  cwd_suggestions: Array<{ label: string; path: string }>
+  guide: Array<{ group: string; commands: string[] }>
+  limits: {
+    cwd_scope: string
+    max_command_chars: number
+    max_timeout_seconds: number
+    runs_as: string
+  }
+  security_notes: string[]
+}
+
+export type ShellCommandResponse = {
+  job: AgentJob
+}
+
 export type HomeDashboardSummary = {
   activeSites: number
   alerts: Array<{ label: string; tone?: "amber" | "emerald" | "red" }>
@@ -2223,6 +2241,18 @@ export const hostingApi = {
 
   advancedItemLogs: (id: number) =>
     apiFetch<GitDeployLogs>(`/hosting/advanced-items/${id}/logs/`),
+
+  shellCommandGuide: (account: string) =>
+    apiFetch<ShellCommandGuide>(`/hosting/advanced-items/shell-guide/?account=${encodeURIComponent(account)}`),
+
+  shellCommandHistory: (account: string) =>
+    apiFetch<{ results: AgentJob[] }>(`/hosting/advanced-items/shell-history/?account=${encodeURIComponent(account)}`),
+
+  runShellCommand: (payload: { account: string; command: string; cwd: string; timeout?: number }) =>
+    apiFetch<ShellCommandResponse>("/hosting/advanced-items/shell-command/", {
+      body: JSON.stringify(payload),
+      method: "POST",
+    }),
 
   deleteAdvancedItem: (id: number) =>
     apiFetch<void>(`/hosting/advanced-items/${id}/`, {
