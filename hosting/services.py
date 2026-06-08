@@ -347,15 +347,17 @@ def apply_account_software(account):
         if account.web_engine == HostingAccount.WebEngine.OPENLITESPEED
         else AgentJob.Type.PROVISION_HOSTING
     )
-    queue_agent_job(
-        run,
-        1,
-        "apply_software",
-        job_type,
-        {
+    domains = list(account.domains.all())
+    if not domains:
+        domains = [None]
+    for index, hosting_domain in enumerate(domains, start=1):
+        domain = hosting_domain.domain if hosting_domain else account.primary_domain
+        payload = {
             "username": account.username,
-            "domain": account.primary_domain,
+            "domain": domain,
             "php_version": account.php_version,
+            "document_root": (hosting_domain.document_root if hosting_domain else "public_html") or "public_html",
+            "ssl_active": bool(hosting_domain and hosting_domain.ssl_status == HostingDomain.Status.ACTIVE),
             "write_default_index": False,
             "limits": {
                 "disk_mb": account.disk_mb,
@@ -364,8 +366,8 @@ def apply_account_software(account):
                 "cpu_pct": account.cpu_pct,
                 "global": effective_global_limits_for_account(account),
             },
-        },
-    )
+        }
+        queue_agent_job(run, index, "apply_software", job_type, payload)
     account.status = HostingAccount.Status.PROVISIONING
     account.save(update_fields=["status", "updated_at"])
     return run

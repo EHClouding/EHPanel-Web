@@ -945,9 +945,10 @@ def provision_hosting(payload, settings):
             index.write_text(f"<h1>{domain}</h1>\n<p>EHPanel Web</p>\n", encoding="utf-8")
             run(["chown", f"{username}:{username}", str(index)])
     write_default_spa_fallback(account_document_root(username, settings, document_root), username)
-    nginx_conf = write_nginx_proxy(domain, username, settings, document_root=document_root)
-    mail_autoconfig_conf = write_mail_autoconfig_nginx_proxy(domain, username, settings)
-    webmail_conf = write_webmail_nginx_proxy(domain, username, settings)
+    ssl_active = bool(payload.get("ssl_active"))
+    nginx_conf = write_nginx_proxy(domain, username, settings, ssl=ssl_active, document_root=document_root)
+    mail_autoconfig_conf = write_mail_autoconfig_nginx_proxy(domain, username, settings, ssl=ssl_active)
+    webmail_conf = write_webmail_nginx_proxy(domain, username, settings, ssl=ssl_active)
     ols_vhost = write_ols_vhost(domain, username, settings, document_root=document_root)
     checks = [run(["nginx", "-t"])]
     run(["systemctl", "reload", "nginx"], check=False)
