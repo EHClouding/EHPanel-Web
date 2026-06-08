@@ -2630,6 +2630,39 @@ export const hostingApi = {
     })
   },
 
+  fileUploadChunkWithProgress: (
+    accountId: string,
+    payload: { chunk: Blob; chunkIndex: number; chunkOffset: number; fileName: string; totalChunks: number; totalSize: number; uploadId: string },
+    onProgress?: (progress: UploadProgress) => void,
+  ) => {
+    const data = new FormData()
+    data.set("file", payload.chunk, payload.fileName)
+    data.set("upload_id", payload.uploadId)
+    data.set("chunk_index", String(payload.chunkIndex))
+    data.set("chunk_offset", String(payload.chunkOffset))
+    data.set("total_chunks", String(payload.totalChunks))
+    data.set("file_name", payload.fileName)
+    data.set("total_size", String(payload.totalSize))
+    return rawApiRequest<{ status: string; upload_id: string; chunk_index: number; total_chunks: number; size: number }>(`/hosting/accounts/${accountId}/files/upload-chunk/`, {
+      body: data,
+      method: "POST",
+      onProgress,
+    })
+  },
+
+  fileUploadComplete: (accountId: string, payload: { fileName: string; overwrite?: boolean; path: string; totalChunks: number; totalSize: number; uploadId: string }) =>
+    apiFetch<FileListResponse>(`/hosting/accounts/${accountId}/files/upload-complete/`, {
+      body: JSON.stringify({
+        file_name: payload.fileName,
+        overwrite: payload.overwrite ?? true,
+        path: payload.path,
+        total_chunks: payload.totalChunks,
+        total_size: payload.totalSize,
+        upload_id: payload.uploadId,
+      }),
+      method: "POST",
+    }),
+
   fileImportUrl: (accountId: string, url: string, path: string, overwrite = true) =>
     apiFetch<FileListResponse>(`/hosting/accounts/${accountId}/files/import-url/`, {
       body: JSON.stringify({ overwrite, path, url }),

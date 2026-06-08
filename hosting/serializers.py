@@ -2783,6 +2783,29 @@ class AccountFileUploadSerializer(serializers.Serializer):
     overwrite = serializers.BooleanField(default=True)
 
 
+class AccountFileUploadChunkSerializer(serializers.Serializer):
+    upload_id = serializers.RegexField(r"^[A-Fa-f0-9-]{32,36}$")
+    chunk_index = serializers.IntegerField(min_value=0)
+    chunk_offset = serializers.IntegerField(min_value=0, required=False)
+    total_chunks = serializers.IntegerField(min_value=1, max_value=10000)
+    file_name = serializers.RegexField(r"^[^/\\]{1,255}$")
+    total_size = serializers.IntegerField(min_value=1, required=False)
+
+    def validate(self, attrs):
+        if attrs["chunk_index"] >= attrs["total_chunks"]:
+            raise serializers.ValidationError({"chunk_index": "El indice del chunk excede el total."})
+        return attrs
+
+
+class AccountFileUploadCompleteSerializer(serializers.Serializer):
+    upload_id = serializers.RegexField(r"^[A-Fa-f0-9-]{32,36}$")
+    file_name = serializers.RegexField(r"^[^/\\]{1,255}$")
+    path = serializers.CharField(max_length=1024)
+    total_chunks = serializers.IntegerField(min_value=1, max_value=10000)
+    total_size = serializers.IntegerField(min_value=1, required=False)
+    overwrite = serializers.BooleanField(default=True)
+
+
 class InitialDatabaseSerializer(serializers.Serializer):
     engine = serializers.ChoiceField(choices=HostingDatabase.Engine.choices, default=HostingDatabase.Engine.MARIADB)
     name = serializers.RegexField(r"^[A-Za-z0-9_]{1,64}$")

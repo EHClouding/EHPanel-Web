@@ -28,7 +28,7 @@ import {
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
-import { hostingApi, type FileManagerItem, type HostingAccount } from "@/api/hosting"
+import { hostingApi, type FileListResponse, type FileManagerItem, type HostingAccount } from "@/api/hosting"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -73,6 +73,8 @@ type FileTaskSession = {
   startedAt: number
   title: string
 }
+const LARGE_UPLOAD_THRESHOLD = 64 * 1024 * 1024
+const LARGE_UPLOAD_CHUNK_SIZE = 16 * 1024 * 1024
 
 export function FilesPage() {
   const [accounts, setAccounts] = useState<HostingAccount[]>([])
@@ -230,13 +232,23 @@ export function FilesPage() {
       let openLiteSpeedRestarted = false
       for (const [index, item] of items.entries()) {
         setUploadSession((current) => current ? { ...current, currentFile: item.relativePath, currentIndex: index, fileProgress: 0 } : current)
-        const response = await hostingApi.fileUploadWithProgress(accountId, joinPath(currentPath, item.relativePath), item.file, true, (progress) => {
-          setUploadSession((current) => current ? {
-            ...current,
-            fileProgress: progress.percent,
-            loaded: uploadedBeforeCurrent + progress.loaded,
-          } : current)
-        })
+        const targetPath = joinPath(currentPath, item.relativePath)
+        const response = item.file.size >= LARGE_UPLOAD_THRESHOLD
+          ? await uploadLargeFile(accountId, targetPath, item.file, item.relativePath, (loaded) => {
+              const percent = item.file.size ? Math.round((loaded / item.file.size) * 100) : 0
+              setUploadSession((current) => current ? {
+                ...current,
+                fileProgress: Math.max(0, Math.min(100, percent)),
+                loaded: uploadedBeforeCurrent + loaded,
+              } : current)
+            })
+          : await hostingApi.fileUploadWithProgress(accountId, targetPath, item.file, true, (progress) => {
+              setUploadSession((current) => current ? {
+                ...current,
+                fileProgress: progress.percent,
+                loaded: uploadedBeforeCurrent + progress.loaded,
+              } : current)
+            })
         const completed = await waitFileResult(response.job, response)
         openLiteSpeedRestarted = openLiteSpeedRestarted || resultFlag(completed, "openlitespeed_restarted")
         uploadedBeforeCurrent += item.file.size
@@ -1283,6 +1295,56 @@ async function waitFileResult(jobId: string, initial: { status: string; job: str
   }
 
   return initial
+}
+
+async function uploadLargeFile(
+  accountId: string,
+  path: string,
+  file: File,
+  relativeName: string,
+  onLoaded: (loaded: number) => void,
+): Promise<FileListResponse> {
+  const totalChunks = Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE))
+  const uploadId = createUploadId()
+  let committedLoaded = 0
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const start = chunkIndex * LARGE_UPLOAD_CHUNK_SIZE
+    const end = Math.min(file.size, start + LARGE_UPLOAD_CHUNK_SIZE)
+    const chunk = file.slice(start, end)
+    await hostingApi.fileUploadChunkWithProgress(
+      accountId,
+      {
+        chunk,
+        chunkIndex,
+        chunkOffset: start,
+        fileName: file.name || relativeName,
+        totalChunks,
+        totalSize: file.size,
+        uploadId,
+      },
+      (progress) => {
+        onLoaded(committedLoaded + progress.loaded)
+      },
+    )
+    committedLoaded += chunk.size
+    onLoaded(committedLoaded)
+  }
+  return hostingApi.fileUploadComplete(accountId, {
+    fileName: file.name || relativeName,
+    overwrite: true,
+    path,
+    totalChunks,
+    totalSize: file.size,
+    uploadId,
+  })
+}
+
+function createUploadId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID()
+  }
+  const random = Array.from({ length: 4 }, () => Math.random().toString(16).slice(2).padEnd(8, "0").slice(0, 8)).join("")
+  return random.slice(0, 32)
 }
 
 function extractItems(response: { items?: FileManagerItem[]; result?: unknown }) {

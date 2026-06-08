@@ -45,6 +45,8 @@ from .serializers import (
     AccountFilePathSerializer,
     AccountFileRenameSerializer,
     AccountFileTransferSerializer,
+    AccountFileUploadChunkSerializer,
+    AccountFileUploadCompleteSerializer,
     AccountFileUploadSerializer,
     AccountFileWriteSerializer,
     ActivateDomainWebmailSerializer,
@@ -304,6 +306,57 @@ def save_account_upload_file(uploaded_file):
         for chunk in uploaded_file.chunks():
             destination.write(chunk)
     return target
+
+
+def account_chunk_upload_root(upload_id):
+    safe_id = re.sub(r"[^A-Fa-f0-9-]+", "", str(upload_id or ""))[:36]
+    if not safe_id:
+        safe_id = uuid.uuid4().hex
+    root = Path(settings.LOCAL_FILE_MANAGER_TEMP_ROOT) / "uploads" / "chunked" / safe_id
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def safe_upload_file_name(file_name):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", file_name or "upload.bin")[:180] or "upload.bin"
+
+
+def save_account_upload_chunk(uploaded_file, upload_id, chunk_index, file_name, chunk_offset=0):
+    upload_root = account_chunk_upload_root(upload_id)
+    markers_root = upload_root / "chunks"
+    markers_root.mkdir(parents=True, exist_ok=True)
+    target = upload_root / f"{safe_upload_file_name(file_name)}.uploading"
+    mode = "r+b" if target.exists() else "w+b"
+    with target.open(mode) as destination:
+        destination.seek(int(chunk_offset or 0))
+        for chunk in uploaded_file.chunks():
+            destination.write(chunk)
+        destination.flush()
+        os.fsync(destination.fileno())
+    marker = markers_root / f"{int(chunk_index):08d}.done"
+    marker.write_text(str(uploaded_file.size), encoding="ascii")
+    return target
+
+
+def assemble_account_upload_chunks(upload_id, file_name, total_chunks, total_size=None):
+    upload_root = account_chunk_upload_root(upload_id)
+    chunks_root = upload_root / "chunks"
+    safe_name = safe_upload_file_name(file_name)
+    assembled = upload_root / f"{safe_name}.uploading"
+    missing = []
+    for index in range(int(total_chunks)):
+        marker = chunks_root / f"{index:08d}.done"
+        if not marker.exists():
+            missing.append(index)
+    if missing:
+        raise ValidationError({"chunks": f"Faltan chunks: {missing[:10]}"})
+    if not assembled.exists():
+        raise ValidationError({"upload_id": "No se encontro el archivo ensamblado."})
+    if total_size is not None and assembled.stat().st_size != int(total_size):
+        raise ValidationError({"total_size": "El tamano ensamblado no coincide con el tamano original."})
+    final_path = upload_root / safe_name
+    assembled.replace(final_path)
+    return final_path
 
 
 def account_download_export_path(filename):
@@ -2147,6 +2200,61 @@ class HostingAccountViewSet(viewsets.ModelViewSet):
         response = self._file_job_response(account, AgentJob.Type.FILE_UPLOAD, payload)
         audit_action(request, AuditLog.Action.ACCOUNT_UPDATED, account=account, metadata={"file_action": "upload", "path": serializer.validated_data["path"], "size": uploaded_file.size})
         return response
+
+    @action(detail=True, methods=["post"], url_path="files/upload-chunk", parser_classes=[MultiPartParser, FormParser])
+    def file_upload_chunk(self, request, pk=None):
+        self.get_object()
+        uploaded_file = request.FILES.get("file")
+        if not uploaded_file:
+            return Response({"detail": "Chunk requerido."}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = AccountFileUploadChunkSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        chunk_path = save_account_upload_chunk(
+            uploaded_file,
+            serializer.validated_data["upload_id"],
+            serializer.validated_data["chunk_index"],
+            serializer.validated_data["file_name"],
+            serializer.validated_data.get("chunk_offset", 0),
+        )
+        return Response(
+            {
+                "status": "uploaded",
+                "upload_id": serializer.validated_data["upload_id"],
+                "chunk_index": serializer.validated_data["chunk_index"],
+                "total_chunks": serializer.validated_data["total_chunks"],
+                "size": chunk_path.stat().st_size,
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="files/upload-complete")
+    def file_upload_complete(self, request, pk=None):
+        account = self.get_object()
+        serializer = AccountFileUploadCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        upload_id = serializer.validated_data["upload_id"]
+        upload_root = account_chunk_upload_root(upload_id)
+        source_path = assemble_account_upload_chunks(
+            upload_id,
+            serializer.validated_data["file_name"],
+            serializer.validated_data["total_chunks"],
+            serializer.validated_data.get("total_size"),
+        )
+        payload = {
+            "path": serializer.validated_data["path"],
+            "source_path": str(source_path),
+            "overwrite": serializer.validated_data["overwrite"],
+        }
+        try:
+            response = self._file_job_response(account, AgentJob.Type.FILE_UPLOAD, payload)
+            audit_action(
+                request,
+                AuditLog.Action.ACCOUNT_UPDATED,
+                account=account,
+                metadata={"file_action": "upload", "path": serializer.validated_data["path"], "size": serializer.validated_data.get("total_size", 0), "chunked": True},
+            )
+            return response
+        finally:
+            shutil.rmtree(upload_root, ignore_errors=True)
 
     @action(detail=True, methods=["post"], url_path="files/import-url")
     def file_import_url(self, request, pk=None):
