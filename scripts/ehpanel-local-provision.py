@@ -1037,13 +1037,28 @@ def issue_ssl(payload, settings):
         if alias_domain == domain or alias_domain in requested_aliases:
             continue
         alias_dns_ok, alias_resolved_ips, alias_expected_ips, alias_dns_reason = dns_target_matches_node(alias_domain, payload, settings)
-        if alias_dns_ok:
-            requested_aliases.append(alias_domain)
-        else:
+        if not alias_dns_ok:
             skipped_aliases.append({"domain": alias_domain, "reason": alias_dns_reason, "resolved_ips": alias_resolved_ips, "expected_ips": alias_expected_ips})
+            continue
+        alias_probe_host = alias_expected_ips[0] if alias_expected_ips else alias_domain
+        alias_probe_ok, alias_probe_detail = verify_acme_http_challenge(alias_domain, webroot, connect_host=alias_probe_host)
+        if not alias_probe_ok:
+            skipped_aliases.append(
+                {
+                    "domain": alias_domain,
+                    "reason": "acme_http01_not_reachable",
+                    "resolved_ips": alias_resolved_ips,
+                    "expected_ips": alias_expected_ips,
+                    "detail": alias_probe_detail,
+                }
+            )
+            continue
+        requested_aliases.append(alias_domain)
     args = ["certbot", "certonly", "--webroot", "-w", webroot, "-d", domain, "--noninteractive", "--agree-tos", "--email", payload.get("email") or f"admin@{domain}"]
     for alias in requested_aliases:
         args.extend(["-d", alias])
+    if (cert_dir / "fullchain.pem").exists() and requested_aliases:
+        args.append("--expand")
     if payload.get("staging"):
         args.append("--staging")
     if payload.get("force_renewal"):
