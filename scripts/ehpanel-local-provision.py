@@ -582,8 +582,8 @@ server {{
 def write_mail_autoconfig_nginx_proxy(domain, username, settings, ssl=False):
     nginx_dir = Path(settings["nginx_vhosts_dir"])
     nginx_dir.mkdir(parents=True, exist_ok=True)
-    home = Path(settings["home_root"]) / username
     safe_domain = validate_domain(domain)
+    acme_root = acme_challenge_root(safe_domain, settings)
     server_names = f"autoconfig.{safe_domain} autodiscover.{safe_domain}"
     log_name = safe_vhost_name(f"mail-autoconfig.{safe_domain}")
     locations_http = nginx_mail_autoconfig_locations(settings)
@@ -600,7 +600,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-ssl-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-ssl-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {home}/public_html/.well-known/acme-challenge/;
+        alias {acme_root}/.well-known/acme-challenge/;
         default_type text/plain;
     }}
 {locations_https}
@@ -615,7 +615,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {home}/public_html/.well-known/acme-challenge/;
+        alias {acme_root}/.well-known/acme-challenge/;
         default_type text/plain;
     }}
 {locations_http}
@@ -665,8 +665,9 @@ def write_webmail_nginx_proxy(domain, username, settings, ssl=False):
         return None
     nginx_dir = Path(settings["nginx_vhosts_dir"])
     nginx_dir.mkdir(parents=True, exist_ok=True)
-    home = Path(settings["home_root"]) / username
-    webmail_domain = f"webmail.{validate_domain(domain)}"
+    safe_domain = validate_domain(domain)
+    acme_root = acme_challenge_root(safe_domain, settings)
+    webmail_domain = f"webmail.{safe_domain}"
     webmail_root = Path(settings.get("webmail_root") or "/opt/ehpanel-webmail") / "frontend" / "dist"
     backend = f"http://127.0.0.1:{int(settings.get('webmail_port') or 8012)}"
     log_name = safe_vhost_name(webmail_domain)
@@ -685,7 +686,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-ssl-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-ssl-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {home}/public_html/.well-known/acme-challenge/;
+        alias {acme_root}/.well-known/acme-challenge/;
         default_type text/plain;
     }}
     location /api/ {{
@@ -714,7 +715,7 @@ server {{
     access_log /var/log/nginx/ehpanel-{log_name}-access.log;
     error_log /var/log/nginx/ehpanel-{log_name}-error.log;
     location ^~ /.well-known/acme-challenge/ {{
-        alias {home}/public_html/.well-known/acme-challenge/;
+        alias {acme_root}/.well-known/acme-challenge/;
         default_type text/plain;
     }}
     location /api/ {{
