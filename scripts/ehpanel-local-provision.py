@@ -2697,6 +2697,145 @@ def read_json_file(path):
         return {}
 
 
+def extract_php_assigned_value(path, variable):
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = re.search(r"\$" + re.escape(variable) + r"\s*=\s*['\"]([^'\"]+)['\"]", text)
+    return match.group(1).strip() if match else ""
+
+
+def detect_wordpress_version(path):
+    return extract_php_assigned_value(Path(path) / "wp-includes" / "version.php", "wp_version")
+
+
+def detect_moodle_version(path):
+    try:
+        text = (Path(path) / "version.php").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = re.search(r"\$release\s*=\s*['\"]([^'\"]+)['\"]", text)
+    return match.group(1).strip() if match else ""
+
+
+def node_package_summary(path):
+    package = read_json_file(Path(path) / "package.json")
+    if not isinstance(package, dict):
+        package = {}
+    scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
+    deps = package.get("dependencies") if isinstance(package.get("dependencies"), dict) else {}
+    dev_deps = package.get("devDependencies") if isinstance(package.get("devDependencies"), dict) else {}
+    return {
+        "name": str(package.get("name") or Path(path).name or "Node.js"),
+        "version": str(package.get("version") or ""),
+        "scripts": sorted(scripts.keys())[:30],
+        "package_manager": detect_package_manager(path, "auto"),
+        "dependencies": sorted(set(list(deps.keys()) + list(dev_deps.keys())))[:80],
+        "start_script": scripts.get("start") or "",
+        "build_script": scripts.get("build") or "",
+    }
+
+
+def detect_app_at_path(domain, path, home):
+    path = Path(path)
+    metadata = {}
+    if (path / "wp-config.php").exists() and (path / "wp-includes").exists():
+        return {
+            "domain": domain,
+            "app_type": "wordpress",
+            "name": "WordPress",
+            "install_path": str(path),
+            "url": f"https://{domain}",
+            "version": detect_wordpress_version(path),
+            "metadata": {"detected_from": "wp-config.php"},
+        }
+    if (path / "config.php").exists() and (path / "version.php").exists() and (path / "lib" / "moodlelib.php").exists():
+        return {
+            "domain": domain,
+            "app_type": "moodle",
+            "name": "Moodle",
+            "install_path": str(path),
+            "url": f"https://{domain}",
+            "version": detect_moodle_version(path),
+            "metadata": {"detected_from": "moodle-version.php"},
+        }
+    if (path / "artisan").exists() and (path / "composer.json").exists():
+        return {
+            "domain": domain,
+            "app_type": "laravel",
+            "name": "Laravel",
+            "install_path": str(path),
+            "url": f"https://{domain}",
+            "version": "",
+            "metadata": {"detected_from": "artisan"},
+        }
+    if (path / "manage.py").exists():
+        return {
+            "domain": domain,
+            "app_type": "django",
+            "name": "Django",
+            "install_path": str(path),
+            "url": f"https://{domain}",
+            "version": "",
+            "metadata": {"detected_from": "manage.py"},
+        }
+    if (path / "package.json").exists():
+        metadata = node_package_summary(path)
+        return {
+            "domain": domain,
+            "app_type": "nodejs",
+            "name": metadata.get("name") or "Node.js",
+            "install_path": str(path),
+            "url": f"https://{domain}",
+            "version": metadata.get("version") or "",
+            "metadata": {**metadata, "detected_from": "package.json"},
+        }
+    return None
+
+
+def detect_apps(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    home = (Path(settings["home_root"]) / username).resolve(strict=False)
+    if not home.exists():
+        return ok(apps=[], scanned=[], missing_home=str(home))
+
+    apps = []
+    scanned = []
+    seen = set()
+    domains = payload.get("domains") or []
+    for item in domains:
+        domain = validate_domain(item.get("domain"))
+        document_root = str(item.get("document_root") or "public_html").strip().replace("\\", "/").strip("/")
+        root = (home / document_root).resolve(strict=False)
+        if os.path.commonpath([str(home), str(root)]) != str(home):
+            scanned.append({"domain": domain, "path": str(root), "status": "outside_home"})
+            continue
+        if not root.exists():
+            scanned.append({"domain": domain, "path": str(root), "status": "missing"})
+            continue
+
+        candidates = [root]
+        for child in root.iterdir():
+            if child.is_dir() and child.name not in {"node_modules", ".git", ".venv", "vendor", "wp-admin", "wp-content", "wp-includes"}:
+                candidates.append(child)
+
+        for candidate in candidates:
+            detected = detect_app_at_path(domain, candidate, home)
+            scanned.append({"domain": domain, "path": str(candidate), "status": "detected" if detected else "empty"})
+            if not detected:
+                continue
+            key = (detected["domain"], detected["app_type"])
+            if key in seen:
+                continue
+            seen.add(key)
+            apps.append(detected)
+            break
+
+    return ok(apps=apps, scanned=scanned)
+
+
 def wordpress_toolkit(payload, settings):
     username = payload["username"]
     validate_username(username)
@@ -4481,6 +4620,8 @@ def main():
             return python_toolkit(payload, settings)
         if job_type == "laravel_toolkit":
             return laravel_toolkit(payload, settings)
+        if job_type == "detect_apps":
+            return detect_apps(payload, settings)
         if job_type == "collect_app_logs":
             return collect_app_logs(payload, settings)
         if job_type == "create_mail_domain":
