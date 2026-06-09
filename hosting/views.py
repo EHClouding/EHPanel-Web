@@ -186,6 +186,7 @@ from .services import (
     queue_app_backup,
     queue_app_delete,
     queue_app_update_check,
+    configure_node_runtime,
     run_laravel_toolkit,
     run_node_toolkit,
     run_python_toolkit,
@@ -4901,6 +4902,17 @@ class HostingApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         if job.status == AgentJob.Status.FAILED:
             return Response({"detail": job.error_detail or job.error_code or "No se pudo ejecutar la accion.", "job": str(job.id)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"job": str(job.id), "status": job.status, "result": job.result or {}})
+
+    @action(detail=True, methods=["post"], url_path="node-config")
+    def node_config(self, request, pk=None):
+        app = self.get_object()
+        if app.app_type != HostingApplication.AppType.NODEJS:
+            return Response({"detail": "Esta accion solo aplica a Node.js."}, status=status.HTTP_400_BAD_REQUEST)
+        job = configure_node_runtime(app, request.data or {})
+        if job.status == AgentJob.Status.FAILED:
+            return Response({"detail": job.error_detail or job.error_code or "No se pudo configurar Node.js.", "job": str(job.id), "result": job.result or {}}, status=status.HTTP_400_BAD_REQUEST)
+        app.refresh_from_db()
+        return Response({"job": str(job.id), "status": job.status, "result": job.result or {}, "app": HostingApplicationSerializer(app, context=self.get_serializer_context()).data})
 
     @action(detail=True, methods=["get", "post"], url_path="laravel-tool")
     def laravel_tool(self, request, pk=None):

@@ -3268,6 +3268,71 @@ def run_node_toolkit(app, action="summary", repo_url="", branch="", timeout=12):
     return job
 
 
+def configure_node_runtime(app, config, timeout=30):
+    if app.app_type != HostingApplication.AppType.NODEJS:
+        raise ValueError("Solo Node.js soporta configuracion de runtime.")
+    metadata = app.metadata or {}
+    instance_id = str(config.get("instance_id") or metadata.get("instance_id") or f"nodejs-{app.id}").strip()
+    port = int(config.get("port") or metadata.get("port") or 3001)
+    script = str(config.get("script") or metadata.get("script") or "app.js").strip()
+    install_path = str(config.get("application_root") or app.install_path or metadata.get("working_dir") or "").strip()
+    document_root = str(config.get("document_root") or app.domain.document_root or "public_html").strip()
+    mode = str(config.get("mode") or metadata.get("mode") or "production").strip() or "production"
+    package_manager = str(config.get("package_manager") or metadata.get("package_manager") or "auto").strip() or "auto"
+    env_vars = config.get("env") if isinstance(config.get("env"), dict) else {}
+    payload = {
+        "app_id": app.id,
+        "username": app.account.username,
+        "domain": app.domain.domain,
+        "ssl_active": app.domain.ssl_status == HostingDomain.Status.ACTIVE,
+        "path": install_path,
+        "document_root": document_root,
+        "instance_id": instance_id,
+        "port": port,
+        "script": script,
+        "mode": mode,
+        "package_manager": package_manager,
+        "env": env_vars,
+        "action": "configure",
+    }
+    job = AgentJob.objects.create(node=app.account.node, job_type=AgentJob.Type.NODE_TOOLKIT, payload=payload)
+    dispatch_or_execute_local(job)
+    deadline = timezone.now().timestamp() + timeout
+    while timezone.now().timestamp() < deadline:
+        job.refresh_from_db()
+        if job.status in [AgentJob.Status.SUCCESS, AgentJob.Status.FAILED]:
+            break
+        time.sleep(0.25)
+    app.last_job = job
+    if job.status == AgentJob.Status.SUCCESS:
+        result = job.result or {}
+        merged = {
+            **metadata,
+            "instance_id": instance_id,
+            "port": port,
+            "working_dir": install_path,
+            "application_root": install_path,
+            "document_root": document_root,
+            "script": script,
+            "mode": mode,
+            "package_manager": package_manager,
+            "runtime": "nodejs",
+            "node_toolkit": result,
+        }
+        if env_vars:
+            merged["env"] = env_vars
+        app.metadata = merged
+        app.install_path = install_path
+        app.url = result.get("url") or hosting_domain_base_url(app.domain)
+        app.status = HostingApplication.Status.ACTIVE
+        if result.get("node_version"):
+            app.version = str(result["node_version"])
+        app.save(update_fields=["last_job", "metadata", "install_path", "url", "status", "version", "updated_at"])
+    else:
+        app.save(update_fields=["last_job", "updated_at"])
+    return job
+
+
 def run_laravel_toolkit(app, action="summary", repo_url="", branch="", timeout=12):
     if app.app_type != HostingApplication.AppType.LARAVEL:
         raise ValueError("Solo Laravel soporta EHPanel Laravel Tool.")

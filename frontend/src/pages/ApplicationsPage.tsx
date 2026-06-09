@@ -24,7 +24,7 @@
 } from "lucide-react"
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react"
 
-import { hostingApi, type AppCatalogItem, type AppInstallSuggestion, type FileManagerItem, type HostingApplication, type HostingApplicationBackup, type HostingDomain, type LaravelToolkitResult, type NodeToolkitResult, type PythonToolkitResult, type WordPressToolkitResult } from "@/api/hosting"
+import { hostingApi, type AppCatalogItem, type AppInstallSuggestion, type FileManagerItem, type HostingApplication, type HostingApplicationBackup, type HostingDomain, type LaravelToolkitResult, type NodeApplicationConfigPayload, type NodeToolkitResult, type PythonToolkitResult, type WordPressToolkitResult } from "@/api/hosting"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -42,6 +42,7 @@ export function ApplicationsPage() {
   const [backups, setBackups] = useState<HostingApplicationBackup[]>([])
   const [installApp, setInstallApp] = useState<AppCatalogItem | null>(null)
   const [requirementsApp, setRequirementsApp] = useState<AppCatalogItem | null>(null)
+  const [nodeConfigApp, setNodeConfigApp] = useState<HostingApplication | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [message, setMessage] = useState("")
 
@@ -129,7 +130,7 @@ export function ApplicationsPage() {
         </div>
 
         <div className="p-4">
-          {activeTab === "Instaladas" && <InstalledAppsTable apps={apps} backups={latestBackupByApp} isLoading={isLoading} onBackup={(app) => void runAction(() => hostingApi.backupApplication(app.id), "Backup solicitado.")} onCheckUpdates={(app) => void runAction(() => hostingApi.checkApplicationUpdates(app.id), "Comprobación de actualizaciones enviada.")} onDelete={(app) => void runAction(() => hostingApi.deleteApplication(app.id), "Eliminación enviada.")} onRestart={(app) => void runAction(() => hostingApi.restartApplication(app.id), "Reinicio enviado.")} />}
+          {activeTab === "Instaladas" && <InstalledAppsTable apps={apps} backups={latestBackupByApp} isLoading={isLoading} onBackup={(app) => void runAction(() => hostingApi.backupApplication(app.id), "Backup solicitado.")} onCheckUpdates={(app) => void runAction(() => hostingApi.checkApplicationUpdates(app.id), "Comprobación de actualizaciones enviada.")} onConfigureNode={setNodeConfigApp} onDelete={(app) => void runAction(() => hostingApi.deleteApplication(app.id), "Eliminación enviada.")} onRestart={(app) => void runAction(() => hostingApi.restartApplication(app.id), "Reinicio enviado.")} />}
           {activeTab === "Catálogo" && <CatalogGrid apps={catalog} onInstall={setInstallApp} onRequirements={setRequirementsApp} />}
           {activeTab === "EHPanel App's" && (
             <EHPanelApps apps={apps} onRefresh={loadApps} selectedRuntime={selectedRuntime} onSelectRuntime={setSelectedRuntime} />
@@ -149,6 +150,7 @@ export function ApplicationsPage() {
         />
       ) : null}
       {requirementsApp ? <RequirementsModal app={requirementsApp} onClose={() => setRequirementsApp(null)} /> : null}
+      {nodeConfigApp ? <NodeConfigModal app={nodeConfigApp} onClose={() => setNodeConfigApp(null)} onSaved={loadApps} /> : null}
     </div>
   )
 }
@@ -159,6 +161,7 @@ function InstalledAppsTable({
   isLoading,
   onBackup,
   onCheckUpdates,
+  onConfigureNode,
   onDelete,
   onRestart,
 }: {
@@ -167,6 +170,7 @@ function InstalledAppsTable({
   isLoading: boolean
   onBackup: (app: HostingApplication) => void
   onCheckUpdates: (app: HostingApplication) => void
+  onConfigureNode: (app: HostingApplication) => void
   onDelete: (app: HostingApplication) => void
   onRestart: (app: HostingApplication) => void
 }) {
@@ -211,6 +215,7 @@ function InstalledAppsTable({
                 <td className="px-3 py-2">
                   <div className="flex justify-end gap-1">
                     <IconAction icon={ExternalLink} label="Abrir app" onClick={() => window.open(app.url, "_blank")} />
+                    {app.type === "nodejs" ? <IconAction icon={ServerCog} label="Configurar Node.js" onClick={() => onConfigureNode(app)} /> : null}
                     <IconAction icon={RefreshCcw} label="Comprobar updates" onClick={() => onCheckUpdates(app)} />
                     {app.type !== "wordpress" && app.type !== "moodle" ? <IconAction icon={Play} label="Reiniciar" onClick={() => onRestart(app)} /> : null}
                     <IconAction icon={Archive} label="Backup" onClick={() => onBackup(app)} />
@@ -256,6 +261,129 @@ function CatalogGrid({ apps, onInstall, onRequirements }: { apps: AppCatalogItem
       {!apps.length ? <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-500">No hay aplicaciones publicadas en el Catálogo de Server0.</div> : null}
     </div>
   )
+}
+
+function NodeConfigModal({ app, onClose, onSaved }: { app: HostingApplication; onClose: () => void; onSaved: () => Promise<void> }) {
+  const metadata = app.metadata || {}
+  const [form, setForm] = useState<NodeApplicationConfigPayload>({
+    application_root: String(metadata.application_root || metadata.working_dir || app.install_path || ""),
+    document_root: String(metadata.document_root || ""),
+    env: isObject(metadata.env) ? Object.fromEntries(Object.entries(metadata.env).map(([key, value]) => [key, String(value)])) : {},
+    instance_id: String(app.instance_id || metadata.instance_id || `nodejs-${app.id}`),
+    mode: String(metadata.mode || "production"),
+    package_manager: String(metadata.package_manager || "auto"),
+    port: Number(app.port || metadata.port || 3001),
+    script: String(metadata.script || metadata.startup_file || "app.js"),
+  })
+  const [envText, setEnvText] = useState(() => Object.entries(form.env || {}).map(([key, value]) => `${key}=${value}`).join("\n"))
+  const [error, setError] = useState("")
+  const [isSaving, setIsSaving] = useState(false)
+
+  const update = (key: keyof NodeApplicationConfigPayload, value: string | number) => {
+    setForm((current) => ({ ...current, [key]: value }))
+  }
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault()
+    setError("")
+    setIsSaving(true)
+    try {
+      await hostingApi.configureNodeApplication(app.id, { ...form, env: parseEnvText(envText) })
+      await onSaved()
+      onClose()
+    } catch (saveError) {
+      setError(readMessage(saveError))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const nodeTool = metadata.node_toolkit as NodeToolkitResult | undefined
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4">
+      <div className="max-h-[92vh] w-full max-w-3xl overflow-hidden rounded-lg bg-white shadow-2xl">
+        <div className="flex items-start justify-between border-b border-slate-200 px-4 py-3">
+          <div>
+            <div className="eh-kicker">Node.js en {app.domain_name}</div>
+            <h3 className="text-lg font-bold text-slate-900">Configuración de aplicación</h3>
+          </div>
+          <button className="grid h-8 w-8 place-items-center rounded-md text-slate-500 hover:bg-slate-100" onClick={onClose} type="button">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <form className="max-h-[calc(92vh-64px)] overflow-y-auto p-4" onSubmit={save}>
+          {error ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{error}</div> : null}
+          <div className="mb-4 flex flex-wrap gap-2">
+            <Button onClick={() => void hostingApi.nodeToolAction(app.id, { action: "restart_service" })} size="sm" type="button" variant="outline">
+              <RefreshCcw className="h-4 w-4" />
+              Reiniciar app
+            </Button>
+            <Button onClick={() => void hostingApi.nodeToolAction(app.id, { action: "install_dependencies" })} size="sm" type="button" variant="outline">
+              <Package className="h-4 w-4" />
+              Instalación de NPM
+            </Button>
+            <Button onClick={() => void hostingApi.nodeToolAction(app.id, { action: "build" })} size="sm" type="button" variant="outline">
+              <Play className="h-4 w-4" />
+              Ejecutar build
+            </Button>
+            <Button onClick={() => window.open(app.url, "_blank")} size="sm" type="button" variant="outline">
+              <ExternalLink className="h-4 w-4" />
+              Abrir URL
+            </Button>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <ReadonlyInfo label="Versión de Node.js" value={app.version || nodeTool?.node_version || "-"} />
+            <ReadonlyInfo label="Estado del servicio" value={String(nodeTool?.service_status || app.status || "-")} />
+            <FormSelect label="Administrador de paquetes" value={form.package_manager} onChange={(value) => update("package_manager", value)}>
+              <option value="auto">auto</option>
+              <option value="npm">npm</option>
+              <option value="pnpm">pnpm</option>
+              <option value="yarn">yarn</option>
+            </FormSelect>
+            <FormSelect label="Modo de aplicación" value={form.mode} onChange={(value) => update("mode", value)}>
+              <option value="production">production</option>
+              <option value="development">development</option>
+            </FormSelect>
+            <FormInput label="Raíz del documento" value={form.document_root} onChange={(value) => update("document_root", value)} />
+            <FormInput label="Raíz de la aplicación" value={form.application_root} onChange={(value) => update("application_root", value)} />
+            <FormInput label="Archivo de inicio" value={form.script} onChange={(value) => update("script", value)} />
+            <FormInput label="Puerto interno" type="number" value={String(form.port)} onChange={(value) => update("port", Number(value || 0))} />
+            <FormInput label="Instance ID" value={form.instance_id} onChange={(value) => update("instance_id", value)} />
+            <ReadonlyInfo label="URL de la aplicación" value={app.url || `https://${app.domain_name}`} />
+          </div>
+          <label className="mt-3 grid gap-1 text-xs font-bold text-slate-600">
+            Variables de entorno
+            <textarea className="min-h-[120px] rounded-md border border-slate-200 px-3 py-2 font-mono text-xs text-slate-800 outline-none focus:border-blue-400" onChange={(event) => setEnvText(event.target.value)} placeholder={"KEY=value\nOTRA=value"} value={envText} />
+          </label>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button onClick={onClose} type="button" variant="outline">Cancelar</Button>
+            <Button disabled={isSaving} type="submit">{isSaving ? "Guardando..." : "Guardar y activar"}</Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function ReadonlyInfo({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid gap-1 text-xs font-bold text-slate-600">
+      {label}
+      <div className="min-h-9 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800">{value}</div>
+    </div>
+  )
+}
+
+function parseEnvText(text: string) {
+  const env: Record<string, string> = {}
+  text.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) return
+    const [key, ...rest] = trimmed.split("=")
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) env[key] = rest.join("=")
+  })
+  return env
 }
 
 type InstallForm = {

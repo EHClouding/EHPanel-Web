@@ -476,6 +476,27 @@ def nginx_app_include_line(domain):
     return f"    include /etc/nginx/ehpanel-apps/{safe_vhost_name(domain)}-*.conf;"
 
 
+def nginx_root_app_conf(domain):
+    return Path("/etc/nginx/ehpanel-apps-root") / f"{safe_vhost_name(domain)}.conf"
+
+
+def nginx_backend_location_block(backend, scheme="$scheme"):
+    return f"""    location / {{
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto {scheme};
+        proxy_pass {backend};
+    }}"""
+
+
+def nginx_root_location_block(domain, backend, scheme="$scheme"):
+    root_conf = nginx_root_app_conf(domain)
+    if root_conf.exists():
+        return f"    include {root_conf};"
+    return nginx_backend_location_block(backend, scheme)
+
+
 def nginx_advanced_include_line(domain):
     return f"    include /etc/nginx/ehpanel-advanced/{safe_vhost_name(domain)}-*.conf;"
 
@@ -519,6 +540,8 @@ def write_nginx_proxy(domain, username, settings, ssl=False, document_root="publ
     docroot = account_document_root(username, settings, document_root)
     acme_root = acme_challenge_root(domain, settings)
     backend = f"http://127.0.0.1:{int(settings['ols_backend_port'])}"
+    http_root_location = nginx_root_location_block(domain, backend)
+    https_root_location = nginx_root_location_block(domain, backend, "https")
     log_name = safe_vhost_name(domain)
     cert_lines = ""
     listen_ssl = ""
@@ -539,13 +562,7 @@ server {{
     }}
 {nginx_mail_autoconfig_locations(settings, "https")}
 {app_include}
-    location / {{
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_pass {backend};
-    }}
+{https_root_location}
 }}
 """
     config = f"""server {{
@@ -559,13 +576,7 @@ server {{
     }}
 {nginx_mail_autoconfig_locations(settings)}
 {app_include}
-    location / {{
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_pass {backend};
-    }}
+{http_root_location}
 }}
 {listen_ssl}
 {cert_lines}
@@ -611,6 +622,8 @@ def write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root="
     docroot = account_document_root(username, settings, document_root)
     acme_root = acme_challenge_root(domain, settings)
     backend = f"http://127.0.0.1:{int(settings['ols_backend_port'])}"
+    http_root_location = nginx_root_location_block(domain, backend)
+    https_root_location = nginx_root_location_block(domain, backend, "https")
     log_name = safe_vhost_name(domain)
     cert, key = ensure_acme_bootstrap_certificate()
     app_include = nginx_app_include_line(domain)
@@ -625,13 +638,7 @@ def write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root="
     }}
 {nginx_mail_autoconfig_locations(settings)}
 {app_include}
-    location / {{
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_pass {backend};
-    }}
+{http_root_location}
 }}
 server {{
     listen 443 ssl;
@@ -647,13 +654,7 @@ server {{
     }}
 {nginx_mail_autoconfig_locations(settings, "https")}
 {app_include}
-    location / {{
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_pass {backend};
-    }}
+{https_root_location}
 }}
 """
     target = nginx_dir / f"ehpanel-{safe_vhost_name(domain)}.conf"
@@ -1324,6 +1325,29 @@ def write_path_proxy(domain, instance_id, port, settings, routes=None):
     ensure_nginx_app_include(domain, settings)
     run(["nginx", "-t"])
     run(["systemctl", "reload", "nginx"], check=False)
+    return conf
+
+
+def write_root_app_proxy(domain, port, settings):
+    domain = validate_domain(domain)
+    port = int(port)
+    apps_dir = Path("/etc/nginx/ehpanel-apps-root")
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    conf = nginx_root_app_conf(domain)
+    conf.write_text(
+        f"""location / {{
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://127.0.0.1:{port};
+    }}
+""",
+        encoding="utf-8",
+    )
     return conf
 
 
@@ -2370,6 +2394,57 @@ http.createServer((req, res) => {{
     return ok(app_id=payload.get("app_id"), url=public_url(payload, domain, f"/__apps/{instance_id}/"), install_path=str(app_dir), service=service, proxy=str(proxy), node_version=command_stdout([node_bin, "--version"]))
 
 
+def configure_node_app(payload, settings):
+    username = payload["username"]
+    validate_username(username)
+    domain = validate_domain(payload["domain"])
+    instance_id = validate_instance_id(payload.get("instance_id") or f"node-{payload.get('app_id')}")
+    port = int(payload["port"])
+    if port < 1024 or port > 65535:
+        raise ValueError("Puerto interno invalido.")
+    app_dir = app_path(payload, settings)
+    script = str(payload.get("script") or "app.js").strip().strip("/") or "app.js"
+    server = (app_dir / script).resolve(strict=False)
+    if os.path.commonpath([str(app_dir.resolve(strict=False)), str(server)]) != str(app_dir.resolve(strict=False)):
+        raise ValueError("Archivo de inicio fuera de la aplicacion.")
+    if not server.exists():
+        raise ValueError(f"No existe el archivo de inicio: {server}")
+    package_manager = detect_package_manager(app_dir, payload.get("package_manager") or "auto")
+    if truthy(payload.get("install_dependencies", False)):
+        result = run(package_install_command(app_dir, package_manager).split(), cwd=str(app_dir), check=False)
+        if result.get("returncode") != 0:
+            raise RuntimeError(result.get("stderr") or result.get("stdout") or "No se pudieron instalar dependencias.")
+
+    env_lines = [f"export PORT={port}", f"export NODE_ENV={str(payload.get('mode') or 'production').strip() or 'production'}"]
+    extra_env = payload.get("env") if isinstance(payload.get("env"), dict) else {}
+    for key, value in sorted(extra_env.items()):
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(key)):
+            env_lines.append(f"export {key}={shell_quote(value)}")
+    start_script = app_dir / ".ehpanel-start-node.sh"
+    node_bin = shutil.which("node") or "/usr/bin/node"
+    start_script.write_text("#!/bin/sh\n" + "\n".join(env_lines) + f"\nexec {node_bin} {shell_quote(str(server))}\n", encoding="utf-8")
+    start_script.chmod(0o755)
+    chown_account(username, app_dir)
+    service = write_systemd_app_service(username, instance_id, app_dir, start_script, f"EHPanel Node app {instance_id}")
+    root_proxy = write_root_app_proxy(domain, port, settings)
+    write_nginx_proxy(domain, username, settings, ssl=truthy(payload.get("ssl_active")), document_root=payload.get("document_root") or "public_html")
+    run(["nginx", "-t"])
+    run(["systemctl", "reload", "nginx"], check=False)
+    return ok(
+        app_id=payload.get("app_id"),
+        url=public_url(payload, domain, "/"),
+        install_path=str(app_dir),
+        script=script,
+        port=port,
+        mode=str(payload.get("mode") or "production"),
+        package_manager=package_manager,
+        service=service,
+        service_status=service_for_instance(instance_id)[1],
+        root_proxy=str(root_proxy),
+        node_version=command_stdout([node_bin, "--version"]),
+    )
+
+
 def deploy_git_app(payload, settings):
     username = payload["username"]
     validate_username(username)
@@ -2826,6 +2901,8 @@ def detect_apps(payload, settings):
             scanned.append({"domain": domain, "path": str(candidate), "status": "detected" if detected else "empty"})
             if not detected:
                 continue
+            metadata = detected.get("metadata") if isinstance(detected.get("metadata"), dict) else {}
+            detected["metadata"] = {**metadata, "document_root": document_root}
             key = (detected["domain"], detected["app_type"])
             if key in seen:
                 continue
@@ -2933,14 +3010,23 @@ def node_toolkit(payload, settings):
     service, service_status = service_for_instance(instance_id)
     if action == "summary":
         package = read_json_file(path / "package.json")
+        package_summary = node_package_summary(path)
         return ok(
             app_id=payload.get("app_id"),
             node_version=command_stdout([shutil.which("node") or "node", "--version"]),
             package_version=package.get("version", ""),
+            package_name=package_summary.get("name", ""),
+            package_manager=package_summary.get("package_manager", "npm"),
+            scripts=package_summary.get("scripts", []),
+            has_start_script=bool(package_summary.get("start_script")),
+            start_script=package_summary.get("start_script", ""),
+            build_script=package_summary.get("build_script", ""),
             service=service,
             service_status=service_status,
             path=str(path),
         )
+    if action == "configure":
+        return configure_node_app({**payload, "path": str(path), "instance_id": instance_id}, settings)
     if action in {"restart_service", "install_dependencies", "build", "audit", "git_pull"}:
         if action == "restart_service":
             result = run(["systemctl", "restart", service], check=False)
@@ -4604,6 +4690,8 @@ def main():
             return install_moodle_app(payload, settings)
         if job_type == "deploy_node_app":
             return deploy_node_app(payload, settings)
+        if job_type == "configure_node_app":
+            return configure_node_app(payload, settings)
         if job_type == "deploy_git_app":
             return deploy_git_app(payload, settings)
         if job_type == "backup_app":

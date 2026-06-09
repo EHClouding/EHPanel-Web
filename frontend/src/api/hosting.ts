@@ -1674,6 +1674,17 @@ export type AppInstallSuggestion = {
 
 export type InstallCatalogAppPayload = Record<string, unknown>
 
+export type NodeApplicationConfigPayload = {
+  application_root: string
+  document_root: string
+  env?: Record<string, string>
+  instance_id: string
+  mode: string
+  package_manager: string
+  port: number
+  script: string
+}
+
 export type HostingApplicationBackup = {
   id: number
   app: number
@@ -3059,6 +3070,12 @@ export const hostingApi = {
 
   nodeToolAction: (id: number, payload: { action: string; repo_url?: string; branch?: string }) =>
     apiFetch<{ job: string; status: string; result: NodeToolkitResult }>(`/hosting/apps/${id}/node-tool/`, {
+      body: JSON.stringify(payload),
+      method: "POST",
+    }),
+
+  configureNodeApplication: (id: number, payload: NodeApplicationConfigPayload) =>
+    apiFetch<{ app: HostingApplication; job: string; status: string; result: NodeToolkitResult }>(`/hosting/apps/${id}/node-config/`, {
       body: JSON.stringify(payload),
       method: "POST",
     }),
