@@ -154,6 +154,7 @@ def dns_template_context(hosting_domain, public_ip=""):
         "domain": domain,
         "ip": ip,
         "mail_host": f"mail.{domain}",
+        "mail_client_host": getattr(settings, "MAIL_CLIENT_HOSTNAME", "") or account.node.hostname,
         "selector": selector,
         "hostname": account.node.hostname,
         "ftp_host": f"ftp.{domain}",

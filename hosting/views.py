@@ -4507,6 +4507,16 @@ def outlook_autodiscover_xml(domain, email):
       <AccountType>email</AccountType>
       <Action>settings</Action>
       <Protocol>
+        <Type>POP3</Type>
+        <Server>{escape(mail_host)}</Server>
+        <Port>995</Port>
+        <DomainRequired>off</DomainRequired>
+        <LoginName>{escape(email)}</LoginName>
+        <SPA>off</SPA>
+        <SSL>on</SSL>
+        <AuthRequired>on</AuthRequired>
+      </Protocol>
+      <Protocol>
         <Type>IMAP</Type>
         <Server>{escape(mail_host)}</Server>
         <Port>993</Port>
@@ -4519,13 +4529,14 @@ def outlook_autodiscover_xml(domain, email):
       <Protocol>
         <Type>SMTP</Type>
         <Server>{escape(mail_host)}</Server>
-        <Port>587</Port>
+        <Port>465</Port>
         <DomainRequired>off</DomainRequired>
         <LoginName>{escape(email)}</LoginName>
         <SPA>off</SPA>
         <SSL>on</SSL>
         <AuthRequired>on</AuthRequired>
         <UsePOPAuth>off</UsePOPAuth>
+        <SMTPLast>off</SMTPLast>
       </Protocol>
     </Account>
   </Response>
@@ -4551,7 +4562,7 @@ def ios_mobileconfig(domain, email):
                 "IncomingMailServerUsername": email,
                 "OutgoingMailServerAuthentication": "EmailAuthPassword",
                 "OutgoingMailServerHostName": mail_host,
-                "OutgoingMailServerPortNumber": 587,
+                "OutgoingMailServerPortNumber": 465,
                 "OutgoingMailServerUseSSL": True,
                 "OutgoingMailServerUsername": email,
                 "OutgoingPasswordSameAsIncomingPassword": True,
