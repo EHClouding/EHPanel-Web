@@ -172,7 +172,7 @@ export function SoftwarePage() {
     setMessage("")
     try {
       await hostingApi.updateAccount(selected.id, { php_version: phpVersion, web_engine: webEngine })
-      setMessage("Configuracion guardada en la cuenta.")
+      setMessage("Configuracion guardada y aplicada en el nodo.")
       await loadAccounts()
     } catch (reason) {
       setError(readMessage(reason))
@@ -188,7 +188,7 @@ export function SoftwarePage() {
     setMessage("")
     try {
       await hostingApi.applyAccountSoftware(selected.id, { php_version: phpVersion, web_engine: webEngine })
-      setMessage("Aplicacion de software enviada al agente.")
+      setMessage("Aplicacion de software enviada al nodo.")
       await loadAccounts()
     } catch (reason) {
       setError(readMessage(reason))

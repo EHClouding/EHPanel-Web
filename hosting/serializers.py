@@ -1,6 +1,7 @@
 import ipaddress
 import re
 
+from django.conf import settings
 from django.utils import timezone
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
@@ -1361,7 +1362,7 @@ class HostingMailboxSerializer(serializers.ModelSerializer):
 
     def get_manual_config(self, obj):
         domain = obj.email.split("@", 1)[1] if "@" in obj.email else obj.account.primary_domain
-        host = f"mail.{domain}"
+        host = getattr(settings, "MAIL_CLIENT_HOSTNAME", "") or f"mail.{domain}"
         return {
             "username": obj.email,
             "incoming_server": host,

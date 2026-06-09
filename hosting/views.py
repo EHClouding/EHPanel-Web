@@ -1412,11 +1412,16 @@ class HostingAccountViewSet(viewsets.ModelViewSet):
         updated = serializer.save()
         after = {field: getattr(updated, f"{field}_id", None) if field in ["plan", "owner", "reseller"] else getattr(updated, field, None) for field in tracked_fields}
         changes = {field: {"from": before[field], "to": after[field]} for field in tracked_fields if before[field] != after[field]}
+        runtime_changed = any(field in changes for field in ["web_engine", "php_version"])
+        runtime_run = apply_account_software(updated) if runtime_changed else None
         audit_action(
             self.request,
             AuditLog.Action.ACCOUNT_UPDATED,
             account=updated,
-            metadata={"changes": changes},
+            metadata={
+                "changes": changes,
+                "runtime_reprovision_run": str(runtime_run.id) if runtime_run else "",
+            },
         )
 
     @action(detail=False, methods=["post"], url_path="provision")
@@ -1484,7 +1489,7 @@ class HostingAccountViewSet(viewsets.ModelViewSet):
         account = self.get_object()
         serializer = self.get_serializer(account, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        account = serializer.save()
         run = apply_account_software(account)
         audit_action(
             request,
@@ -4459,7 +4464,7 @@ def extract_email_from_autodiscover(raw):
 
 
 def thunderbird_autoconfig_xml(domain, email):
-    mail_host = f"mail.{domain}"
+    mail_host = getattr(settings, "MAIL_CLIENT_HOSTNAME", "") or f"mail.{domain}"
     display_domain = escape(domain)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <clientConfig version="1.1">
@@ -4494,7 +4499,7 @@ def thunderbird_autoconfig_xml(domain, email):
 
 
 def outlook_autodiscover_xml(domain, email):
-    mail_host = f"mail.{domain}"
+    mail_host = getattr(settings, "MAIL_CLIENT_HOSTNAME", "") or f"mail.{domain}"
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006">
   <Response xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a">
@@ -4529,7 +4534,7 @@ def outlook_autodiscover_xml(domain, email):
 
 
 def ios_mobileconfig(domain, email):
-    mail_host = f"mail.{domain}"
+    mail_host = getattr(settings, "MAIL_CLIENT_HOSTNAME", "") or f"mail.{domain}"
     account_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"ehpanel-mail-{email}")).upper()
     profile_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"ehpanel-profile-{email}")).upper()
     payload = {
