@@ -212,6 +212,21 @@ def postfix_virtual_mailboxes_path(settings=None):
     return Path(settings.get("postfix_virtual_mailboxes_file") or "/etc/postfix/ehpanel-virtual-mailboxes")
 
 
+def postfix_tls_sni_map_path(settings=None):
+    settings = settings or {}
+    return Path(settings.get("postfix_tls_sni_map_file") or "/etc/postfix/ehpanel-tls-sni")
+
+
+def postfix_tls_sni_chain_dir(settings=None):
+    settings = settings or {}
+    return Path(settings.get("postfix_tls_sni_chain_dir") or "/etc/postfix/ehpanel-sni-chains")
+
+
+def dovecot_tls_sni_conf_path(settings=None):
+    settings = settings or {}
+    return Path(settings.get("dovecot_tls_sni_conf_file") or "/etc/dovecot/conf.d/99-ehpanel-sni.conf")
+
+
 def dovecot_password_hash(password):
     completed = subprocess.run(
         ["doveadm", "pw", "-s", "SHA512-CRYPT", "-p", str(password)],
@@ -383,6 +398,73 @@ def reload_postfix():
     result = run(["systemctl", "reload", "postfix"], check=False)
     if result.get("returncode") != 0:
         run(["systemctl", "restart", "postfix"], check=False)
+
+
+def configure_mail_tls_sni(domain, names, settings=None):
+    settings = settings or {}
+    cert_dir = Path("/etc/letsencrypt/live") / domain
+    privkey = cert_dir / "privkey.pem"
+    fullchain = cert_dir / "fullchain.pem"
+    if not privkey.exists() or not fullchain.exists():
+        return {"configured": False, "reason": "certificate_missing"}
+
+    mail_names = sorted({name for name in names if str(name).startswith("mail.")})
+    if not mail_names:
+        return {"configured": False, "reason": "mail_name_missing"}
+
+    chain_dir = postfix_tls_sni_chain_dir(settings)
+    chain_dir.mkdir(parents=True, exist_ok=True)
+    chain_file = chain_dir / f"{safe_vhost_name(domain)}.pem"
+    chain_file.write_text(
+        privkey.read_text(encoding="utf-8", errors="ignore") + fullchain.read_text(encoding="utf-8", errors="ignore"),
+        encoding="utf-8",
+    )
+    run(["chown", "root:postfix", str(chain_file)], check=False)
+    chain_file.chmod(0o640)
+
+    sni_map = postfix_tls_sni_map_path(settings)
+    changed_postfix = False
+    for name in mail_names:
+        changed_postfix = update_texthash_map(sni_map, name, str(chain_file)) or changed_postfix
+    run(["postconf", "-e", f"tls_server_sni_maps=texthash:{sni_map}"], check=False)
+
+    dovecot_conf = dovecot_tls_sni_conf_path(settings)
+    existing = dovecot_conf.read_text(encoding="utf-8", errors="ignore") if dovecot_conf.exists() else ""
+    blocks = []
+    for name in mail_names:
+        blocks.append(
+            f"local_name {name} {{\n"
+            f"  ssl_cert = <{fullchain}\n"
+            f"  ssl_key = <{privkey}\n"
+            f"}}\n"
+        )
+    managed = "# EHPanel managed mail TLS SNI\n" + "\n".join(blocks)
+    changed_dovecot = existing != managed
+    if changed_dovecot:
+        dovecot_conf.write_text(managed, encoding="utf-8")
+        run(["chown", "root:root", str(dovecot_conf)], check=False)
+        dovecot_conf.chmod(0o644)
+
+    postfix_check = run(["postfix", "check"], check=False)
+    dovecot_check = run(["doveconf", "-n"], check=False)
+    if postfix_check.get("returncode") != 0 or dovecot_check.get("returncode") != 0:
+        return {
+            "configured": False,
+            "reason": "validation_failed",
+            "postfix_check": postfix_check,
+            "dovecot_check": dovecot_check,
+        }
+    if changed_postfix:
+        reload_postfix()
+    if changed_dovecot:
+        reload_dovecot()
+    return {
+        "configured": True,
+        "names": mail_names,
+        "postfix_map": str(sni_map),
+        "postfix_chain": str(chain_file),
+        "dovecot_conf": str(dovecot_conf),
+    }
 
 
 def restore_selinux_context(path):
@@ -584,7 +666,7 @@ def write_mail_autoconfig_nginx_proxy(domain, username, settings, ssl=False):
     nginx_dir.mkdir(parents=True, exist_ok=True)
     safe_domain = validate_domain(domain)
     acme_root = acme_challenge_root(safe_domain, settings)
-    server_names = f"autoconfig.{safe_domain} autodiscover.{safe_domain}"
+    server_names = f"mail.{safe_domain} autoconfig.{safe_domain} autodiscover.{safe_domain}"
     log_name = safe_vhost_name(f"mail-autoconfig.{safe_domain}")
     locations_http = nginx_mail_autoconfig_locations(settings)
     locations_https = nginx_mail_autoconfig_locations(settings, "https")
@@ -1006,8 +1088,12 @@ def issue_ssl(payload, settings):
     cert_dir = Path("/etc/letsencrypt/live") / domain
     if (cert_dir / "fullchain.pem").exists() and (cert_dir / "privkey.pem").exists():
         write_nginx_proxy(domain, username, settings, ssl=True, document_root=document_root)
+        write_mail_autoconfig_nginx_proxy(domain, username, settings, ssl=True)
+        write_webmail_nginx_proxy(domain, username, settings, ssl=True)
     else:
         write_nginx_acme_bootstrap_proxy(domain, username, settings, document_root=document_root)
+        write_mail_autoconfig_nginx_proxy(domain, username, settings, ssl=False)
+        write_webmail_nginx_proxy(domain, username, settings, ssl=False)
     run(["nginx", "-t"])
     run(["systemctl", "reload", "nginx"], check=False)
     dns_ok, resolved_ips, expected_ips, dns_reason = dns_target_matches_node(domain, payload, settings)
@@ -1087,6 +1173,7 @@ def issue_ssl(payload, settings):
     fullchain = cert_dir / "fullchain.pem"
     not_after = ""
     dns_names = [domain, *requested_aliases]
+    mail_tls = configure_mail_tls_sni(domain, dns_names, settings)
     if fullchain.exists():
         expiry = run(["openssl", "x509", "-enddate", "-noout", "-in", str(fullchain)], check=False)
         match = re.search(r"notAfter=(.+)", expiry.get("stdout") or "")
@@ -1099,6 +1186,7 @@ def issue_ssl(payload, settings):
         cert=str(fullchain),
         privkey=str(cert_dir / "privkey.pem"),
         not_after=not_after,
+        mail_tls=mail_tls,
         result=result,
     )
 

@@ -2290,6 +2290,9 @@ def issue_domain_ssl(hosting_domain, email="", include_www=True, staging=False, 
     include_www = bool(include_www) and hosting_domain.domain_type != HostingDomain.DomainType.SUBDOMAIN
     aliases = [f"www.{hosting_domain.domain}"] if include_www else []
     if hosting_domain.domain_type != HostingDomain.DomainType.SUBDOMAIN:
+        mail_alias = f"mail.{hosting_domain.domain}"
+        if not hosting_domain.domain.startswith("mail.") and mail_alias not in aliases:
+            aliases.append(mail_alias)
         webmail_alias = f"webmail.{hosting_domain.domain}"
         if not hosting_domain.domain.startswith("webmail.") and webmail_alias not in aliases:
             aliases.append(webmail_alias)
@@ -4198,7 +4201,7 @@ def provision_hosting_account(account, options):
             "domain": domain,
             "username": account.username,
             "email": ssl_email,
-            "aliases": [f"www.{domain}", f"webmail.{domain}", f"autoconfig.{domain}", f"autodiscover.{domain}"],
+            "aliases": [f"www.{domain}", f"mail.{domain}", f"webmail.{domain}", f"autoconfig.{domain}", f"autodiscover.{domain}"],
             "staging": bool(options.get("ssl_staging", False)),
             "force_renewal": bool(options.get("ssl_force_renewal", False)),
             "backend_port": getattr(settings, "LOCAL_OLS_BACKEND_PORT", 8088),
