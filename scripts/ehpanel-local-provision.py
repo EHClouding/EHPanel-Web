@@ -2119,7 +2119,9 @@ WantedBy=multi-user.target
         encoding="utf-8",
     )
     run(["systemctl", "daemon-reload"])
-    run(["systemctl", "enable", "--now", service])
+    run(["systemctl", "enable", service])
+    run(["systemctl", "reset-failed", service], check=False)
+    run(["systemctl", "restart", service])
     time.sleep(1)
     active = run(["systemctl", "is-active", service], check=False)
     if active.get("returncode") != 0:
