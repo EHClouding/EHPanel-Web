@@ -2842,7 +2842,6 @@ function AdminHostingAccountsPage() {
     const term = search.trim().toLowerCase()
     if (!term) return true
     return [
-      account.customer_name,
       account.customer_email,
       account.primary_domain,
       account.username,
@@ -2886,14 +2885,14 @@ function AdminHostingAccountsPage() {
               <Globe2 className="h-5 w-5" />
             </div>
             <div>
-              <div className="eh-kicker">Clientes</div>
+              <div className="eh-kicker">Hosting</div>
               <h1 className="mt-1 text-xl font-bold tracking-tight">Cuentas de hosting</h1>
               <p className="mt-1 max-w-3xl text-sm text-slate-500">
-                Cuentas creadas o intervenidas por el admin principal y el staff administrativo. No reemplaza la creacion propia del revendedor.
+                Cuentas creadas o intervenidas por el admin principal y el staff administrativo, con acceso directo por dominio, usuario y correo.
               </p>
             </div>
           </div>
-          <Button onClick={() => setShowCreateModal(true)} size="sm">Nueva cuenta admin</Button>
+          <Button onClick={() => setShowCreateModal(true)} size="sm">Nueva cuenta</Button>
         </div>
       </section>
 
@@ -2913,7 +2912,7 @@ function AdminHostingAccountsPage() {
             <input
               className="min-w-0 flex-1 bg-transparent text-slate-700 outline-none placeholder:text-slate-400"
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Buscar cliente, dominio, nodo o staff..."
+              placeholder="Buscar correo, dominio, usuario, nodo o staff..."
               value={search}
             />
           </label>
@@ -2927,7 +2926,7 @@ function AdminHostingAccountsPage() {
         <table className="w-full min-w-[1120px] text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase text-slate-500">
             <tr>
-              {["Cliente", "Dominio", "Plan", "Nodo", "Revendedor", "Creado por", "Estado", "Disco", "Trafico", "Acciones"].map((column) => (
+              {["Dominio", "Usuario", "Correo", "Plan", "Nodo", "Revendedor", "Creado por", "Estado", "Disco", "Trafico", "Acciones"].map((column) => (
                 <th className="px-4 py-2 font-bold" key={column}>{column}</th>
               ))}
             </tr>
@@ -2935,8 +2934,9 @@ function AdminHostingAccountsPage() {
           <tbody className="divide-y divide-slate-100">
             {filteredAccounts.map((account) => (
               <tr className="hover:bg-slate-50" key={account.id}>
-                <td className="px-4 py-3 font-semibold text-slate-900">{account.customer_name || account.username}</td>
-                <td className="px-4 py-3 text-blue-700">{account.primary_domain}</td>
+                <td className="px-4 py-3 font-semibold text-blue-700">{account.primary_domain}</td>
+                <td className="px-4 py-3 text-slate-900">{account.username}</td>
+                <td className="px-4 py-3 text-slate-600">{account.customer_email || "N/D"}</td>
                 <td className="px-4 py-3">{account.plan_name || "Sin plan"}</td>
                 <td className="px-4 py-3">{account.node_hostname || "N/D"}</td>
                 <td className="px-4 py-3">{account.reseller_username || "Sin revendedor"}</td>
@@ -2948,7 +2948,7 @@ function AdminHostingAccountsPage() {
                   <div className="flex justify-end gap-1">
                     <Button onClick={() => setViewingAccount(account)} size="sm" variant="outline">Ver</Button>
                     <Button onClick={() => setChangingPasswordAccount(account)} size="sm" variant="outline"><KeyRound className="h-4 w-4" />Contraseña</Button>
-                    <Button onClick={() => viewAsClient(account)} size="sm" variant="outline">Ver como Cliente</Button>
+                    <Button onClick={() => viewAsClient(account)} size="sm" variant="outline">Entrar al panel</Button>
                     <Button onClick={() => void toggleSuspendAccount(account)} size="sm" variant="outline">{account.status === "suspended" ? "Reactivar" : "Suspender"}</Button>
                   </div>
                 </td>
@@ -2956,14 +2956,14 @@ function AdminHostingAccountsPage() {
             ))}
             {!isLoading && filteredAccounts.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-slate-500" colSpan={10}>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-slate-500" colSpan={11}>
                   {accounts.length === 0 ? "No hay cuentas de hosting creadas." : "No hay cuentas con ese filtro."}
                 </td>
               </tr>
             ) : null}
             {isLoading ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-slate-500" colSpan={10}>Cargando cuentas reales...</td>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-slate-500" colSpan={11}>Cargando cuentas reales...</td>
               </tr>
             ) : null}
           </tbody>
@@ -3020,7 +3020,6 @@ function CreateAdminHostingAccountModal({
 }) {
   const firstPlan = plans[0]
   const firstNode = nodes[0]
-  const [customerName, setCustomerName] = useState("")
   const [customerEmail, setCustomerEmail] = useState("")
   const [username, setUsername] = useState("")
   const [domain, setDomain] = useState("")
@@ -3041,7 +3040,7 @@ function CreateAdminHostingAccountModal({
 
   const submit = async () => {
     if (!selectedPlan || !selectedNode) {
-      setError("Debe existir un plan cliente y un nodo web disponible.")
+      setError("Debe existir un plan de hosting y un nodo web disponible.")
       return
     }
     if (!customerEmail.trim() || !username.trim() || !domain.trim() || password.length < 8) {
@@ -3056,7 +3055,6 @@ function CreateAdminHostingAccountModal({
       const payload: ProvisionHostingAccountPayload = {
         account_password: password,
         customer_email: customerEmail.trim(),
-        customer_name: customerName.trim(),
         node: selectedNode.id,
         php_version: selectedPlan.allowed_php_versions?.[0] ?? "8.3",
         plan: selectedPlan.id,
@@ -3081,8 +3079,8 @@ function CreateAdminHostingAccountModal({
       <div className="w-full max-w-[980px] overflow-hidden rounded-lg bg-white shadow-2xl">
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
           <div>
-            <h3 className="text-lg font-bold">Nueva cuenta de hosting admin</h3>
-            <p className="mt-1 text-sm text-slate-500">Alta de cuenta directa creada por el administrador o staff EHClouding.</p>
+            <h3 className="text-lg font-bold">Nueva cuenta de hosting</h3>
+            <p className="mt-1 text-sm text-slate-500">Alta directa con correo de contacto, dominio, usuario y plan de hosting.</p>
           </div>
           <button className="rounded-md px-2 py-1 text-slate-500 hover:bg-slate-100" onClick={onClose} type="button">Cerrar</button>
         </div>
@@ -3092,24 +3090,11 @@ function CreateAdminHostingAccountModal({
         <div className="p-5">
           <section className="space-y-4">
             <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-              <p className="text-sm font-bold">Datos del cliente</p>
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
-                <PlanTextInput label="Nombre del cliente" onChange={setCustomerName} value={customerName} />
-                <PlanTextInput label="Correo del cliente" onChange={setCustomerEmail} value={customerEmail} />
+              <p className="text-sm font-bold">Datos de la cuenta</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                <PlanTextInput label="Correo de contacto" onChange={setCustomerEmail} value={customerEmail} />
                 <PlanTextInput label="Usuario del sistema" onChange={(value) => setUsername(value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))} value={username} />
                 <PlanTextInput label="Dominio principal" onChange={setDomain} value={domain} />
-                <label className="block">
-                  <span className="mb-1 block text-xs font-bold uppercase text-slate-500">Asignar a revendedor</span>
-                  <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500">
-                    <option>Sin revendedor / cuenta directa</option>
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-xs font-bold uppercase text-slate-500">Estado inicial</span>
-                  <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-medium outline-none focus:border-blue-500">
-                    <option>Pendiente / provisionamiento</option>
-                  </select>
-                </label>
               </div>
             </div>
 
